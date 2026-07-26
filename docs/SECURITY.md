@@ -150,26 +150,49 @@ only long enough to fix volume ownership, then drops with
 capabilities. Tests assert the server process is not root, the shell is not
 root, and the shell can still write `/workspace`.
 
-## Open findings from the security audit
+## Audit findings — resolved
 
-Found by an adversarial audit, confirmed by demonstration, **not yet fixed**:
+An adversarial audit confirmed each of these by demonstration. All are fixed
+and re-verified against the original reproduction:
 
-- **DNS-rebinding TOCTOU in `http_request`.** `is_blocked_host` resolves the
-  name, then httpx resolves it again independently. A TTL-0 record answering
-  public once and private the second time gets through. The complete fix is
-  to resolve once and pin the connection to the vetted address, carrying the
-  hostname in `Host`/SNI. The blocklist itself is now correct; this is the
-  gap between checking and connecting.
-- **`navigate` + `evaluate` are a second, unguarded egress path.** The SSRF
-  blocklist applies only to `http_request`. The browser can be navigated to
-  `http://169.254.169.254/` and its content read back with `get_text`, and
-  `evaluate` runs arbitrary JavaScript which can `fetch()` anything. Any
-  authenticated caller has this. It is not a bypass of a control — no control
-  was ever applied there — but the security story should say so plainly.
-- **`http_request` buffers the whole response before truncating**, so a
-  hostile endpoint returning a multi-GB body can OOM the container.
-- **No cap on concurrent pre-auth WebSocket sockets.** Each is bounded to 10s,
-  so this is availability-only.
+- Auth **failed open** when a configured token file was unreadable; now fatal
+  at startup.
+- SSRF blocklist missed `0.0.0.0` (reaches loopback on Linux) and every IPv6
+  range, and resolved A records only. Replaced with `ipaddress` property
+  checks over `AF_UNSPEC` results.
+- **DNS-rebinding TOCTOU** — the check and the connection resolved DNS
+  independently. `resolve_allowed()` now returns a vetted address and the
+  request is **pinned** to that literal, with the hostname carried in `Host`
+  and SNI. Applied to every redirect hop too.
+- `write_file` could `mkdir -p` outside `/workspace`, because `makedirs`
+  walked the unresolved path through `..`.
+- The PTY leaked a zombie per session against `PidsLimit=200`; PTY readers
+  also occupied asyncio's default executor, so enough sessions would wedge
+  the HTTP surface.
+- The shell could read the token from `/proc/1/environ`; it is now scrubbed
+  from the environment once loaded.
+- `initialize`/`tools/list` were answerable unauthenticated; `/mcp` is gated
+  as a whole.
+- `/ui` was framable; now `X-Frame-Options: DENY` plus a CSP.
+- Privilege drop was incomplete — `NoNewPrivs=0` with the full bounding set
+  and setuid-root binaries present. Now `--no-new-privs --bounding-set=-all`,
+  plus `cap_drop: ALL` in Compose. Verified: `CapBnd: 0`, `NoNewPrivs: 1`.
+- `http_request` buffered whole responses (OOM risk) — now capped while
+  streaming. Pre-auth WebSockets are capped at 16 concurrent. Partial PTY
+  writes were dropped. A timed-out browser dispatch left its coroutine
+  running.
+
+## Known limitation: the browser is a second egress path
+
+`http_request` is SSRF-filtered. **`navigate` and `evaluate` are not.** An
+authenticated caller can point the browser at `http://169.254.169.254/` and
+read it back with `get_text`, and `evaluate` runs arbitrary JavaScript that
+can `fetch()` anything the container can reach.
+
+This is deliberate, not an oversight: the browser's whole purpose is
+navigating to arbitrary URLs, and a future goal is browser-verifying an
+internal host. But it means the SSRF controls constrain one tool and not the
+box, and anyone reasoning about egress should know that.
 
 ## Known limitations, accepted for Phase 1
 

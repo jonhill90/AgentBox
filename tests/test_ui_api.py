@@ -7,8 +7,8 @@ MCP tools call, so the tests that matter most here are the cross-surface
 ones: drive the page over REST, read it back over MCP, and confirm both
 were talking to the one persistent page.
 
-This file sorts last, so the container restart in the final test does
-not disturb anything else.
+One test here restarts the shared container; the tests after it
+re-navigate rather than assuming prior state.
 """
 
 import base64
@@ -299,9 +299,10 @@ async def test_capability_probe_reports_terminal_state():
     status, body = await rest_get("/api/auth-required")
     assert status == 200, body
     assert "terminal_enabled" in body, body
-    assert body["terminal_enabled"] is False, (
-        "the default container has the terminal on — it must default off"
-    )
+    # Reflects THIS container's configuration, not the code default — the
+    # code default is asserted in test_feature_toggle.py against a container
+    # started without the variable at all.
+    assert isinstance(body["terminal_enabled"], bool), body
 
 
 async def test_vendored_xterm_assets_are_served():

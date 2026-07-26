@@ -47,6 +47,7 @@ _policy = PathPolicy(allowed_paths=[WORKSPACE], denied_paths=[], read_only=False
 
 MAX_READ_BYTES = 1_000_000       # 1MB, as Hill90
 MAX_HTTP_RESPONSE_CHARS = 50_000  # as Hill90
+MAX_HTTP_RESPONSE_BYTES = 2_000_000  # hard read cap, so a huge body cannot OOM us
 MAX_REDIRECTS = 3                 # as Hill90; each hop is re-checked, see below
 
 
@@ -272,6 +273,31 @@ def _addr_blocked(addr) -> bool:
                if cidr.version == addr.version)
 
 
+def resolve_allowed(hostname: str) -> str | None:
+    """Return one vetted IP for `hostname`, or None if any answer is blocked.
+
+    Returning the address is what closes the rebinding TOCTOU: the caller
+    connects to THIS literal, so a second DNS answer cannot redirect it. If
+    any returned address is blocked the whole name is refused — a host that
+    answers with one public and one private address is not safe to reach.
+    """
+    try:
+        addrs = socket.getaddrinfo(hostname, None)
+    except (socket.gaierror, UnicodeError, OSError):
+        return None
+    vetted = None
+    for _family, _t, _p, _c, sockaddr in addrs:
+        try:
+            addr = ipaddress.ip_address(sockaddr[0].split("%")[0])
+        except ValueError:
+            return None
+        if _addr_blocked(addr):
+            return None
+        if vetted is None:
+            vetted = addr
+    return str(vetted) if vetted else None
+
+
 def is_blocked_host(hostname: str) -> bool:
     """True if the hostname resolves into a blocked range (or not at all).
 
@@ -291,6 +317,27 @@ def is_blocked_host(hostname: str) -> bool:
         if _addr_blocked(addr):
             return True
     return False
+
+
+def _pin(request):
+    """Rewrite a request to connect to a vetted IP, or None if blocked.
+
+    The host goes in the Host header (and SNI for TLS) while the URL carries
+    the literal address, so the connection cannot be re-pointed by a second
+    DNS answer between the check and the connect.
+    """
+    hostname = request.url.host
+    ip = resolve_allowed(hostname)
+    if ip is None:
+        return None
+    if ALLOW_LOOPBACK and ipaddress.ip_address(ip).is_loopback:
+        return request      # tests drive a real loopback server by name
+    request.headers["Host"] = request.url.netloc.decode("ascii")
+    literal = f"[{ip}]" if ":" in ip else ip
+    request.url = request.url.copy_with(host=literal)
+    request.extensions = dict(request.extensions or {})
+    request.extensions["sni_hostname"] = hostname
+    return request
 
 
 async def execute_http_request(
@@ -330,20 +377,37 @@ async def execute_http_request(
         # service. A blocked hop stops the chain and returns the same
         # structured refusal as a directly-blocked request.
         async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
-            request = client.build_request(
+            request = _pin(client.build_request(
                 method, url, headers=headers, content=(body if method == "POST" else None)
-            )
+            ))
+            if request is None:
+                return json.dumps({
+                    "success": False, "error": "Blocked: internal/private IP range"})
+
             for _hop in range(MAX_REDIRECTS + 1):
-                res = await client.send(request)
+                # Bound the body: res.text would buffer the whole response
+                # first, so a hostile endpoint could OOM us before we
+                # truncated anything.
+                res = await client.send(request, stream=True)
+                try:
+                    body_bytes = b""
+                    async for chunk in res.aiter_bytes():
+                        body_bytes += chunk
+                        if len(body_bytes) > MAX_HTTP_RESPONSE_BYTES:
+                            break
+                finally:
+                    await res.aclose()
 
                 if not res.has_redirect_location:
-                    text = res.text[:MAX_HTTP_RESPONSE_CHARS]
+                    truncated = len(body_bytes) > MAX_HTTP_RESPONSE_BYTES
+                    text = body_bytes[:MAX_HTTP_RESPONSE_BYTES].decode(
+                        res.encoding or "utf-8", errors="replace")
                     return json.dumps({
                         "success": True,
                         "status": res.status_code,
                         "headers": dict(list(res.headers.items())[:20]),
-                        "body": text,
-                        "truncated": len(res.text) > MAX_HTTP_RESPONSE_CHARS,
+                        "body": text[:MAX_HTTP_RESPONSE_CHARS],
+                        "truncated": truncated or len(text) > MAX_HTTP_RESPONSE_CHARS,
                     })
 
                 # httpx builds the next request for us (including the
@@ -359,13 +423,14 @@ async def execute_http_request(
                     })
 
                 hop_host = nxt.url.host or ""
-                if not hop_host or is_blocked_host(hop_host):
+                pinned = _pin(nxt) if hop_host else None
+                if pinned is None:
                     return json.dumps({
                         "success": False,
                         "error": "Blocked: redirect to internal/private IP range",
                     })
 
-                request = nxt
+                request = pinned
 
             return json.dumps({
                 "success": False,

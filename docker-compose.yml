@@ -43,6 +43,21 @@ services:
       # refuses every connection with 4001 when no token is configured.
       - AGENTBOX_ENABLE_TERMINAL=${AGENTBOX_ENABLE_TERMINAL:-false}
 
+    # The entrypoint needs these as root to fix volume ownership and then
+    # drop privileges; everything else is dropped. no-new-privileges is
+    # belt-and-braces alongside setpriv --no-new-privs.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
+      - SETPCAP
+
     deploy:
       resources:
         limits:

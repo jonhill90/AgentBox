@@ -239,8 +239,13 @@ async def test_wrong_token_is_refused(servers):
 
 @requires_docker_introspection
 async def test_right_token_connects(servers):
+    """Asserting on ws.state cannot fail once connect() returns, so this
+    proves the socket is usable instead."""
+    _fresh_shell()
     async with _connect(servers["on"], TOKEN) as ws:
-        assert ws.state.name in ("OPEN", "CONNECTING"), ws.state
+        await ws.send(b"echo connect-$((3*4))-ok\n")
+        out = _plain(await _drain(ws, 8.0))
+        assert b"connect-12-ok" in out, out[-300:]
 
 
 # ── the actual port: a real shell round-trip ─────────────────────────
@@ -354,7 +359,7 @@ async def test_shell_processes_do_not_leak_across_sessions(servers):
     # tmux keeps ONE server + session alive on purpose (new-session -A is
     # what makes a dropped socket reattach), so the count may rise once
     # and then hold. What must not happen is one more shell per session.
-    assert after <= before + 2, (
+    assert after <= before + 1, (
         f"shell processes leaked across sessions: {before} -> {after}"
     )
 
@@ -459,7 +464,10 @@ async def test_token_in_query_string_is_refused(servers):
 def test_the_ui_never_puts_the_token_in_the_websocket_url(servers):
     src = (REPO_ROOT / "src" / "ui.html").read_text()
     assert "?token=" not in src, "UI still builds a token-bearing WebSocket URL"
-    assert '"type": "auth"' in src or '"auth"' in src, "UI has no post-connect auth"
+    # The quoted-key form never appears — ui.html uses a JS object literal —
+    # so an `or` on it was a dead alternative that made the check looser
+    # than it read.
+    assert 'type: "auth"' in src, "UI has no post-connect auth message"
 
 
 # ── browser path: auth as the first message ─────────────────────────

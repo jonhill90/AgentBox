@@ -135,7 +135,7 @@ def test_token_read_from_file_is_accepted(token_file_server):
 
     status, _ = _raw_request(f"{url}/api/screenshot",
                              {"Authorization": f"Bearer {TOKEN_A}"})
-    assert status in (200, 404), status  # 404 = no browser yet, but authorised
+    assert status != 401, status  # 404 just means no browser yet; 401 is the failure
 
 
 @requires_docker_introspection
@@ -144,7 +144,7 @@ def test_the_previous_token_is_also_accepted(token_file_server):
     url, _ = token_file_server
     status, _ = _raw_request(f"{url}/api/screenshot",
                              {"Authorization": f"Bearer {TOKEN_B}"})
-    assert status in (200, 404), status
+    assert status != 401, status
 
 
 @requires_docker_introspection

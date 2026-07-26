@@ -28,9 +28,12 @@ if [ "$(id -u)" = "0" ]; then
     fix_owner /workspace/screenshots
     fix_owner /data/browsers
 
-    # --inh-caps=-all so nothing the shell spawns can regain capabilities.
-    exec setpriv --reuid="$APP_USER" --regid="$APP_USER" \
-         --init-groups --inh-caps=-all "$@"
+    # --inh-caps alone is NOT the escalation route. What matters for a PTY
+    # is --no-new-privs (so a setuid-root binary cannot raise privilege at
+    # exec; the image ships su, mount, passwd and friends) and clearing the
+    # BOUNDING set, which caps what any descendant can ever hold.
+    exec setpriv --reuid="$APP_USER" --regid="$APP_USER" --init-groups \
+         --inh-caps=-all --bounding-set=-all --no-new-privs "$@"
 fi
 
 # Already unprivileged (e.g. `docker run --user`); just run.

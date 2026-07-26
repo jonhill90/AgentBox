@@ -4,8 +4,9 @@ Resource cleanup, load, and restart behaviour.
 
 These tests use `docker top` / `docker compose logs` against the local
 container, so they skip automatically when AGENTBOX_URL points somewhere
-else. They run last (file name sorts last) because the final one
-restarts the container.
+else. The last one restarts the shared container mid-suite; files sorting
+after this one (ssrf_redirects, terminal, ui_api) either need no
+container or restart it themselves.
 """
 
 import asyncio

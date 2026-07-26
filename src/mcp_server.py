@@ -282,7 +282,14 @@ def _run_on_browser_loop_sync(coro, timeout: float = 15.0) -> object:
     Safe to call from any thread (MCP tool handlers, tests).
     """
     future = asyncio.run_coroutine_threadsafe(coro, _browser_loop)
-    return future.result(timeout=timeout)
+    try:
+        return future.result(timeout=timeout)
+    except TimeoutError:
+        # Without this the coroutine keeps running on _browser_loop after we
+        # have stopped waiting for it, so a timed-out call can still be
+        # driving the page while the next one starts.
+        future.cancel()
+        raise
 
 
 # ── Browser (Playwright chromium) ────────────────────────────────────

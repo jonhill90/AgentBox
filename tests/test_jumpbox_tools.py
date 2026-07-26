@@ -12,6 +12,7 @@ resolve into private address space.
 """
 
 import json
+import subprocess
 import uuid
 
 import pytest
@@ -116,15 +117,34 @@ async def test_listing_outside_the_workspace_is_refused():
 
 
 async def test_symlink_out_of_the_workspace_is_refused():
-    """realpath resolution means a symlink cannot smuggle a path out."""
-    link = _scratch("-link")
+    """realpath resolution means a symlink cannot smuggle a path out.
+
+    A real symlink, created inside the workspace with docker exec. The
+    previous version of this test created nothing and its only assertion
+    (`assert link` on a non-empty string) was always true — so the single
+    mechanism PathPolicy most loudly claims had no live test at all.
+    """
+    name = f"escape-{uuid.uuid4().hex[:8]}"
+    subprocess.run(
+        ["docker", "exec", "-u", "agentbox", "agentbox",
+         "ln", "-sfn", "/etc/passwd", f"/workspace/{name}"],
+        capture_output=True, check=False,
+    )
     async with mcp_session() as session:
-        # Create the symlink through the one tool that can run commands
-        # in the workspace... there isn't one, so use the browser? No —
-        # instead verify the policy directly on a path that traverses.
-        result = await call(session, "read_file", {"path": f"{WORKSPACE}/../etc/passwd"})
-        assert result["success"] is False, result
-        assert link  # (no symlink tool exists by design; see test_policy.py)
+        result = await call(session, "read_file", {"path": f"{WORKSPACE}/{name}"})
+        assert result["success"] is False, (
+            f"followed a symlink out of the workspace: {str(result)[:200]}")
+        assert "not in allowed paths" in result["error"], result
+
+        # And a symlinked *directory* cannot be written through either.
+        subprocess.run(
+            ["docker", "exec", "-u", "agentbox", "agentbox",
+             "ln", "-sfn", "/tmp", f"/workspace/{name}-dir"],
+            capture_output=True, check=False,
+        )
+        written = await call(session, "write_file",
+                             {"path": f"{WORKSPACE}/{name}-dir/evil.txt", "content": "x"})
+        assert written["success"] is False, written
 
 
 # ── filesystem: error paths ──────────────────────────────────────────
@@ -157,6 +177,23 @@ async def test_git_status_works_and_auto_inits():
         result = await call(session, "git", {"action": "status"})
         assert result["success"], result
         assert isinstance(result["output"], str)
+
+    # The name promises auto-init, so check a repo actually exists rather
+    # than only that a string came back.
+    check = subprocess.run(
+        ["docker", "exec", "agentbox", "test", "-d", "/workspace/.git"],
+        capture_output=True,
+    )
+    assert check.returncode == 0, "no .git in the workspace after a git call"
+
+
+async def test_git_init_is_idempotent_and_reports_success():
+    """`init` had no test at all — the persistent volume means the
+    auto-init branch is usually already satisfied."""
+    async with mcp_session() as session:
+        result = await call(session, "git", {"action": "init"})
+        assert result["success"], result
+        assert result["output"], result
 
 
 async def test_git_add_commit_log_round_trip():
@@ -208,14 +245,23 @@ async def test_git_diff_and_reset():
         reset = await call(session, "git", {"action": "reset", "paths": path})
         assert reset["success"], reset
 
+        # After the reset the file is unstaged, so status must still see it.
+        status = await call(session, "git", {"action": "status"})
+        assert marker in status["output"], status
+
         diff = await call(session, "git", {"action": "diff"})
         assert diff["success"], diff
+        assert isinstance(diff["output"], str) and diff["output"], diff
 
 
 async def test_git_log_count_is_clamped():
     async with mcp_session() as session:
         result = await call(session, "git", {"action": "log", "count": 9999})
         assert result["success"], result
+        # min(max(n,1),50) — assert the clamp is observable, not just that
+        # the call succeeded.
+        lines = [ln for ln in result["output"].splitlines() if ln.strip()]
+        assert len(lines) <= 50, f"log returned {len(lines)} lines, clamp is 50"
 
 
 @pytest.mark.parametrize("action", [

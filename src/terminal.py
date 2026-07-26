@@ -107,6 +107,13 @@ MAX_AUTH_ATTEMPTS = 5
 # occupy the same threads asyncio.to_thread uses for every browser tool and
 # /api/browser/* route, so enough terminal sessions would wedge the entire
 # HTTP surface with no error.
+# Unauthenticated sockets are cheap to open and live for AUTH_TIMEOUT, so
+# without a ceiling they are a free pre-auth resource sink. Authenticated
+# sessions are not affected — this counter is released as soon as auth
+# succeeds or fails.
+MAX_PENDING_AUTH = 16
+_pending_auth = 0
+
 _PTY_READERS = concurrent.futures.ThreadPoolExecutor(
     max_workers=64, thread_name_prefix="agentbox-pty-reader",
 )
@@ -198,6 +205,20 @@ async def _authenticate(websocket: WebSocket) -> bool:
         return False
 
     # Path 2: post-connect auth. The socket exists but owns nothing yet.
+    global _pending_auth
+    if _pending_auth >= MAX_PENDING_AUTH:
+        logger.warning("Terminal rejected: too many unauthenticated sockets pending")
+        await websocket.close(code=WS_UNAUTHORIZED, reason="busy")
+        return False
+    _pending_auth += 1
+    try:
+        return await _post_connect_auth(websocket)
+    finally:
+        _pending_auth -= 1
+
+
+async def _post_connect_auth(websocket: WebSocket) -> bool:
+    """The browser path: accept, challenge, and require an auth message."""
     await websocket.accept()
     deadline = asyncio.get_event_loop().time() + AUTH_TIMEOUT
     try:
@@ -318,7 +339,15 @@ async def terminal_websocket(websocket: WebSocket) -> None:
                     break
 
                 if message.get("bytes"):
-                    os.write(master_fd, message["bytes"])
+                    # The fd is O_NONBLOCK, so a single write can be partial
+                    # and the unwritten tail would be silently lost — visible
+                    # as dropped characters on a large paste.
+                    data = message["bytes"]
+                    while data:
+                        try:
+                            data = data[os.write(master_fd, data):]
+                        except BlockingIOError:
+                            await asyncio.sleep(0.01)
 
                 elif message.get("text"):
                     try:

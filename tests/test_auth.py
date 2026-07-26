@@ -4,10 +4,10 @@ Local auth layer (SPEC.md §12 / PRD 1.10).
 
 Two halves:
 
-  - With AGENTBOX_AUTH_TOKEN unset — the default the rest of the suite
-    runs under — nothing is gated. The whole existing suite passing
-    unchanged is the real proof of that; the checks here just pin the
-    contract explicitly.
+  - With AGENTBOX_AUTH_TOKEN unset, nothing is gated. NOTE: those checks
+    SKIP on a machine whose .env has a token, which is most of them — so
+    the unauthenticated default is verified in its own container by
+    test_audit_gaps.py instead of being silently unproven here.
   - With it set, a second container is started with the token
     configured (same pattern as the §10 toggle tests) and everything is
     exercised against it: no token, wrong token, right token.
