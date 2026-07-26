@@ -20,12 +20,35 @@ Gated twice over, and both gates are real:
 
   - `AGENTBOX_ENABLE_TERMINAL` must be on, or the route is never
     registered and there is nothing to connect to (SPEC §14 item 4).
-  - `AGENTBOX_AUTH_TOKEN` must be set and must match the `?token=` query
-    param, or the socket is closed with 4001 before it is ever accepted.
-    Note this is FAIL CLOSED: with no token configured the terminal
+  - `AGENTBOX_AUTH_TOKEN` must be set and must be presented, or no PTY
+    is ever spawned. FAIL CLOSED: with no token configured the terminal
     refuses every connection, even though the rest of the server treats
     "no token" as "auth off". Hill90 does the same and never exposes
     this socket unauthenticated even to itself (SPEC §14 item 6).
+
+TWO WAYS TO AUTHENTICATE, and deliberately NOT via `?token=`:
+
+  1. `Authorization: Bearer <token>` on the handshake. Non-browser
+     clients can set headers, so they should — this is checked BEFORE
+     accept(), so an unauthorised machine client never gets a socket.
+  2. Auth as the first message, for browsers. The browser WebSocket API
+     cannot set request headers (MDN: only the `protocols` argument is
+     client-controlled), so the socket is accepted, the server sends
+     {"type":"auth_required"}, and the client must reply
+     {"type":"auth","token":"..."} within AUTH_TIMEOUT seconds.
+
+Hill90 passed the token as `?token=`, and this port deliberately does
+not. RFC 9700 (BCP 240, Jan 2025) §4.3.2 hardens RFC 6750's SHOULD NOT
+into "Clients MUST NOT pass access tokens in a URI query parameter" —
+URLs land in access logs, proxy traces and browser history. Since the
+same secret guards the HTTP surface, one logged URL would be total
+compromise of an endpoint that grants a shell.
+
+The pre-auth window is the dangerous part, and it is why the PTY is
+spawned only AFTER auth succeeds. ttyd <=1.3.0 authenticated its
+handshake but not its WebSocket receive path, which was a pre-auth RCE
+(NCC Group advisory, 2017-09-08). Before auth this handler accepts
+exactly one message type, caps its size, and holds a deadline.
 
 The shell is NOT root. The container runs as the `agentbox` user (uid
 1000) — docker-entrypoint.sh fixes volume ownership and then drops
@@ -59,14 +82,22 @@ TMUX_SESSION = "agent"
 
 # Close code for an auth failure, kept identical to Hill90's.
 #
-# OBSERVABLE BEHAVIOUR, verified: because the close happens BEFORE
-# accept(), uvicorn never completes the handshake and the client sees an
-# HTTP 403 rejection — close code 4001 never reaches it. (Hill90 has the
-# same property, which makes its UI's `event.code === 4001` guard dead
-# code there.) Rejecting pre-accept is the stronger posture, so the code
-# stays and the clients treat a 403 handshake rejection as "do not
-# retry" alongside 4001.
+# Header-authenticated clients are rejected BEFORE accept(), so uvicorn
+# never completes the handshake and they see an HTTP 403 instead of this
+# code. Clients that reach the post-connect auth exchange DO see 4001,
+# because by then a socket exists to close. Both mean "do not retry".
 WS_UNAUTHORIZED = 4001
+
+# How long a connected-but-unauthenticated socket may live. Short on
+# purpose: this is the only window in which an unauthenticated peer holds
+# a socket at all.
+AUTH_TIMEOUT = 10.0
+
+# Nothing legitimate is large before auth; this bounds pre-auth memory.
+MAX_AUTH_MESSAGE_BYTES = 4096
+
+# How many non-auth control frames to tolerate before giving up.
+MAX_AUTH_ATTEMPTS = 5
 
 
 def _resolve_shell() -> tuple[list[str], str]:
@@ -118,17 +149,108 @@ def _child_env() -> dict[str, str]:
     }
 
 
+async def _authenticate(websocket: WebSocket) -> bool:
+    """Authenticate the socket. Returns True only if a PTY may be spawned.
+
+    Path 1 — Authorization header, checked before accept(). Path 2 — the
+    post-connect auth exchange, for browsers that cannot set headers.
+    """
+    # Path 1: header. Machine clients should use this.
+    header = websocket.headers.get("authorization")
+    if header:
+        if auth.check_bearer(header):
+            await websocket.accept()
+            logger.info("Terminal authenticated via Authorization header")
+            return True
+        logger.warning("Terminal rejected: bad Authorization header")
+        await websocket.close(code=WS_UNAUTHORIZED, reason="unauthorized")
+        return False
+
+    # A token in the query string is refused outright rather than
+    # honoured — accepting it would keep the RFC 9700 violation alive for
+    # anyone who kept using the old shape.
+    if websocket.query_params.get("token"):
+        logger.warning(
+            "Terminal rejected: token in query string. Send an Authorization "
+            "header, or authenticate with the first message (RFC 9700 4.3.2)."
+        )
+        await websocket.close(code=WS_UNAUTHORIZED, reason="token in query string")
+        return False
+
+    if not auth.auth_enabled():
+        # Fail closed: no configured token means no terminal, ever.
+        logger.warning("Terminal rejected: no AGENTBOX_AUTH_TOKEN configured")
+        await websocket.close(code=WS_UNAUTHORIZED, reason="unauthorized")
+        return False
+
+    # Path 2: post-connect auth. The socket exists but owns nothing yet.
+    await websocket.accept()
+    deadline = asyncio.get_event_loop().time() + AUTH_TIMEOUT
+    try:
+        await websocket.send_text(json.dumps({"type": "auth_required"}))
+
+        # A client may emit an unrelated control frame (a resize on open,
+        # a keep-alive ping) before it answers the challenge. Those are
+        # ignored rather than fatal — but BINARY frames are shell input,
+        # and accepting those before auth is precisely the ttyd pre-auth
+        # RCE, so they end the connection. The deadline and the message
+        # cap bound this window either way.
+        for _ in range(MAX_AUTH_ATTEMPTS):
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            message = await asyncio.wait_for(websocket.receive(), timeout=remaining)
+
+            if message.get("type") == "websocket.disconnect":
+                return False
+            if message.get("bytes"):
+                logger.warning("Terminal rejected: input sent before authentication")
+                await websocket.close(code=WS_UNAUTHORIZED, reason="unauthorized")
+                return False
+
+            raw = message.get("text") or ""
+            if not raw or len(raw) > MAX_AUTH_MESSAGE_BYTES:
+                logger.warning("Terminal rejected: malformed pre-auth message")
+                await websocket.close(code=WS_UNAUTHORIZED, reason="unauthorized")
+                return False
+
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                logger.warning("Terminal rejected: non-JSON pre-auth message")
+                await websocket.close(code=WS_UNAUTHORIZED, reason="unauthorized")
+                return False
+
+            if payload.get("type") != "auth":
+                continue  # unrelated control frame; not yet authenticated
+
+            if not auth.check_token(payload.get("token")):
+                logger.warning("Terminal rejected: bad auth token")
+                await websocket.close(code=WS_UNAUTHORIZED, reason="unauthorized")
+                return False
+            break
+        else:
+            logger.warning("Terminal rejected: no auth message in time")
+            await websocket.close(code=WS_UNAUTHORIZED, reason="unauthorized")
+            return False
+
+    except (asyncio.TimeoutError, TimeoutError):
+        logger.warning("Terminal rejected: auth timed out")
+        await websocket.close(code=WS_UNAUTHORIZED, reason="auth timeout")
+        return False
+    except (WebSocketDisconnect, RuntimeError):
+        return False
+
+    await websocket.send_text(json.dumps({"type": "auth_ok"}))
+    logger.info("Terminal authenticated via post-connect auth message")
+    return True
+
+
 async def terminal_websocket(websocket: WebSocket) -> None:
     """Handle a WebSocket terminal session."""
-    # Auth BEFORE accept, so an unauthorised client never gets a live
-    # socket. check_token is fail-closed when no token is configured.
-    token = websocket.query_params.get("token", "")
-    if not auth.check_token(token):
-        logger.warning("Unauthorized terminal connection attempt")
-        await websocket.close(code=WS_UNAUTHORIZED, reason="unauthorized")
+    if not await _authenticate(websocket):
         return
 
-    await websocket.accept()
     logger.info("Terminal session opened")
 
     master_fd = -1

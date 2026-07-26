@@ -26,6 +26,43 @@ BASE_URL = os.environ.get("AGENTBOX_URL", f"http://localhost:{PORT}")
 MCP_URL = f"{BASE_URL}/mcp"
 CONTAINER = "agentbox"
 
+def _configured_token() -> str:
+    """The token this deployment is using, if any.
+
+    The suite has to work both ways: a developer with no .env runs an
+    unauthenticated container, and a developer who has switched auth on
+    runs an authenticated one. Reading the same .env Compose reads means
+    the tests exercise the real configuration instead of demanding a
+    particular one.
+    """
+    token = os.environ.get("AGENTBOX_AUTH_TOKEN", "").strip()
+    if token:
+        return token
+    env_file = REPO_ROOT / ".env"
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("AGENTBOX_AUTH_TOKEN="):
+                return line.split("=", 1)[1].strip()
+    return ""
+
+
+AUTH_TOKEN = _configured_token()
+AUTH_ON = bool(AUTH_TOKEN)
+
+
+def auth_headers(extra: dict | None = None) -> dict:
+    headers = dict(extra or {})
+    if AUTH_TOKEN:
+        headers["Authorization"] = f"Bearer {AUTH_TOKEN}"
+    return headers
+
+
+requires_auth_off = pytest.mark.skipif(
+    AUTH_ON, reason="AGENTBOX_AUTH_TOKEN is set; this asserts the unauthenticated default",
+)
+
+
 PAGE_ONE = "https://example.com/"
 PAGE_TWO = "https://example.com/?agentbox=second"
 
@@ -76,7 +113,7 @@ def agentbox_container():
 @asynccontextmanager
 async def mcp_session():
     """Open an initialized MCP client session against the container."""
-    async with streamablehttp_client(MCP_URL) as (read, write, _):
+    async with streamablehttp_client(MCP_URL, headers=auth_headers() or None) as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
             yield session
@@ -98,7 +135,7 @@ async def call(session, name: str, args: dict | None = None) -> dict:
 def _request(path: str, method: str = "GET", body: dict | None = None) -> tuple[int, str, str]:
     """Return (status, body_text, content_type). Never raises on 4xx/5xx."""
     data = json.dumps(body).encode() if body is not None else None
-    headers = {"Content-Type": "application/json"} if data else {}
+    headers = auth_headers({"Content-Type": "application/json"} if data else {})
     req = urllib.request.Request(f"{BASE_URL}{path}", data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:

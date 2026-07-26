@@ -20,6 +20,7 @@ import logging
 import os
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -63,6 +64,101 @@ JUMPBOX_TOOLS_ENABLED = _env_flag("AGENTBOX_ENABLE_JUMPBOX_TOOLS")
 # the one toggle that defaults OFF, including for local dev — every
 # other capability here is a structured tool; this one is a shell.
 TERMINAL_ENABLED = _env_flag("AGENTBOX_ENABLE_TERMINAL", default="false")
+
+
+# ── Origin / Host validation (DNS rebinding) ─────────────────────────
+#
+# The MCP transports spec: "Servers MUST validate the Origin header on all
+# incoming connections to prevent DNS rebinding attacks", answering 403 on
+# a mismatch. RFC 6455 §10.2 asks the same of WebSocket handshakes.
+#
+# Host is checked too, and that is the part people miss. Binding to
+# loopback is NOT by itself a defence: an attacker's page can resolve a
+# hostname they control to 127.0.0.1 and drive this server through your
+# browser, which is exactly CVE-2015-8400 against Shellinabox. Origin
+# alone does not stop it, because the attacker's page has its own origin
+# and simply omits or sets it. Pinning Host to names we expect does.
+#
+# Requests with NO Origin header are allowed: curl, the MCP client and
+# every non-browser caller omit it, and browsers always send one on
+# cross-origin requests. Absence is therefore not the attack shape.
+
+_DEFAULT_HOSTS = "localhost,127.0.0.1,[::1],0.0.0.0"
+
+
+def _split_env(name: str, default: str) -> set[str]:
+    return {v.strip().lower() for v in os.environ.get(name, default).split(",") if v.strip()}
+
+
+ALLOWED_HOSTS = _split_env("AGENTBOX_ALLOWED_HOSTS", _DEFAULT_HOSTS)
+ALLOWED_ORIGINS = _split_env("AGENTBOX_ALLOWED_ORIGINS", "")
+
+
+def _host_allowed(host_header: str | None) -> bool:
+    if not host_header:
+        return True  # HTTP/1.0 and some tooling omit it entirely.
+    if "*" in ALLOWED_HOSTS:
+        return True
+    host = host_header.strip().lower()
+    # Strip the port: any port on an allowed name is fine, since the port
+    # is our own and the rebinding risk is in the NAME.
+    if host.startswith("["):                       # [::1]:8054
+        host = host.split("]")[0] + "]"
+    elif ":" in host:
+        host = host.rsplit(":", 1)[0]
+    return host in ALLOWED_HOSTS
+
+
+def _origin_allowed(origin: str | None) -> bool:
+    if not origin:
+        return True  # Non-browser client; see note above.
+    if "*" in ALLOWED_ORIGINS:
+        return True
+    origin = origin.strip().lower()
+    if origin in ALLOWED_ORIGINS:
+        return True
+    # Default policy: an Origin is acceptable when its HOST is one we
+    # serve — i.e. the page came from this server. Explicit allowlist, no
+    # substring matching (OWASP: "Use an allowlist, not a denylist").
+    try:
+        parsed = urllib.parse.urlparse(origin)
+    except ValueError:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    return _host_allowed(parsed.netloc)
+
+
+def request_origin_ok(headers) -> bool:
+    """True if this request may proceed. Used by HTTP and WebSocket alike."""
+    return _host_allowed(headers.get("host")) and _origin_allowed(headers.get("origin"))
+
+
+class RebindingGuard:
+    """ASGI middleware applying the checks above to every http/websocket scope."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket"):
+            headers = {k.decode("latin-1").lower(): v.decode("latin-1")
+                       for k, v in scope.get("headers", [])}
+            if not request_origin_ok(headers):
+                logger.warning(
+                    "Blocked request: host=%r origin=%r (DNS-rebinding guard)",
+                    headers.get("host"), headers.get("origin"),
+                )
+                if scope["type"] == "websocket":
+                    await send({"type": "websocket.close", "code": 4403})
+                    return
+                await send({"type": "http.response.start", "status": 403,
+                            "headers": [(b"content-type", b"application/json")]})
+                await send({"type": "http.response.body",
+                            "body": b'{"success": false, "status": 403, '
+                                    b'"error": "Forbidden: Origin/Host not allowed"}'})
+                return
+        await self.app(scope, receive, send)
 
 
 # ── Auth wiring (SPEC §12) ───────────────────────────────────────────
@@ -912,7 +1008,14 @@ if __name__ == "__main__":
     logger.info("   URL: http://0.0.0.0:8000/mcp")
 
     try:
-        mcp.run(transport="streamable-http")
+        # mcp.run() builds the Starlette app internally, so the guard is
+        # applied by wrapping the app it builds and serving that ourselves.
+        # Same transport, same routes — only an extra ASGI layer in front.
+        import uvicorn
+
+        app = RebindingGuard(mcp.streamable_http_app())
+        logger.info(f"   DNS-rebinding guard: hosts={sorted(ALLOWED_HOSTS)}")
+        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
     except KeyboardInterrupt:
         logger.info("AgentBox MCP server stopped by user")
     except Exception as e:

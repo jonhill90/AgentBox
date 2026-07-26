@@ -24,7 +24,7 @@ import urllib.request
 
 import pytest
 
-from conftest import CONTAINER, requires_docker_introspection
+from conftest import CONTAINER, REPO_ROOT, requires_docker_introspection
 
 websockets = pytest.importorskip(
     "websockets", reason="pip install websockets to run the terminal tests"
@@ -98,8 +98,19 @@ def _assert_handshake_rejected(exc) -> None:
 
 
 def _ws_url(port: int, token: str | None = None) -> str:
-    url = f"ws://localhost:{port}/terminal"
-    return f"{url}?token={token}" if token else url
+    """Plain URL. Tokens no longer go here — see _connect()."""
+    return f"ws://localhost:{port}/terminal"
+
+
+def _connect(port: int, token: str | None = None):
+    """Connect using the Authorization header, as a non-browser client should.
+
+    RFC 9700 4.3.2 forbids tokens in query parameters, so the header path
+    is what machine clients use; browsers (which cannot set headers) use
+    the post-connect auth message exercised separately below.
+    """
+    headers = {"Authorization": f"Bearer {token}"} if token else None
+    return websockets.connect(_ws_url(port), additional_headers=headers)
 
 
 async def _drain(ws, seconds: float = 3.0) -> bytes:
@@ -127,7 +138,7 @@ import asyncio  # noqa: E402  (used by _drain above)
 async def test_no_terminal_route_when_toggle_is_off(servers):
     """Not a refusal from a live endpoint — nothing to connect to."""
     with pytest.raises(Exception) as exc:
-        async with websockets.connect(_ws_url(servers["off"], TOKEN)):
+        async with _connect(servers["off"], TOKEN):
             pass
     # Starlette answers an unrouted ws path with a 403 handshake rejection.
     assert "403" in str(exc.value) or "rejected" in str(exc.value).lower(), exc.value
@@ -154,7 +165,7 @@ def test_toggle_off_does_not_disturb_the_rest_of_the_server(servers):
 async def test_fail_closed_when_no_token_is_configured(servers):
     """SPEC §15.3: the one place "auth off" must NOT mean "open"."""
     with pytest.raises(Exception) as exc:
-        async with websockets.connect(_ws_url(servers["no_token"], "anything")):
+        async with _connect(servers["no_token"], "anything"):
             pass
     _assert_handshake_rejected(exc.value)
 
@@ -162,7 +173,7 @@ async def test_fail_closed_when_no_token_is_configured(servers):
 @requires_docker_introspection
 async def test_fail_closed_even_with_no_token_supplied(servers):
     with pytest.raises(Exception):
-        async with websockets.connect(_ws_url(servers["no_token"])):
+        async with _connect(servers["no_token"]):
             pass
 
 
@@ -180,24 +191,27 @@ def test_fail_closed_config_warns_loudly_at_startup(servers):
 # ── toggle on, token set: the gate ───────────────────────────────────
 
 @requires_docker_introspection
-async def test_missing_token_is_refused(servers):
-    with pytest.raises(Exception) as exc:
-        async with websockets.connect(_ws_url(servers["on"])):
-            pass
-    _assert_handshake_rejected(exc.value)
+async def test_missing_credential_gets_a_challenge_not_a_shell(servers):
+    """With no Authorization header the socket opens — that is the browser
+    path — but it is challenged and owns nothing until it answers. The
+    "no shell before auth" guarantee is asserted in
+    test_no_pty_is_spawned_before_auth."""
+    async with websockets.connect(_ws_url(servers["on"])) as ws:
+        first = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+        assert first == {"type": "auth_required"}, first
 
 
 @requires_docker_introspection
 async def test_wrong_token_is_refused(servers):
     with pytest.raises(Exception) as exc:
-        async with websockets.connect(_ws_url(servers["on"], WRONG_TOKEN)):
+        async with _connect(servers["on"], WRONG_TOKEN):
             pass
     _assert_handshake_rejected(exc.value)
 
 
 @requires_docker_introspection
 async def test_right_token_connects(servers):
-    async with websockets.connect(_ws_url(servers["on"], TOKEN)) as ws:
+    async with _connect(servers["on"], TOKEN) as ws:
         assert ws.state.name in ("OPEN", "CONNECTING"), ws.state
 
 
@@ -206,7 +220,7 @@ async def test_right_token_connects(servers):
 @requires_docker_introspection
 async def test_echo_round_trip_through_the_pty(servers):
     """The proof the relay works, equivalent to navigate-then-screenshot."""
-    async with websockets.connect(_ws_url(servers["on"], TOKEN)) as ws:
+    async with _connect(servers["on"], TOKEN) as ws:
         await _drain(ws, 2.0)  # let the shell/tmux draw its prompt
 
         await ws.send(b"echo agentbox-terminal-works\n")
@@ -217,7 +231,7 @@ async def test_echo_round_trip_through_the_pty(servers):
 
 @requires_docker_introspection
 async def test_shell_sees_the_workspace(servers):
-    async with websockets.connect(_ws_url(servers["on"], TOKEN)) as ws:
+    async with _connect(servers["on"], TOKEN) as ws:
         await _drain(ws, 2.0)
         await ws.send(b"pwd\n")
         output = await _drain(ws, 6.0)
@@ -227,7 +241,7 @@ async def test_shell_sees_the_workspace(servers):
 @requires_docker_introspection
 async def test_resize_control_frame_reaches_the_shell(servers):
     """A JSON text frame must move the child's idea of the terminal size."""
-    async with websockets.connect(_ws_url(servers["on"], TOKEN)) as ws:
+    async with _connect(servers["on"], TOKEN) as ws:
         await _drain(ws, 2.0)
 
         await ws.send(json.dumps({"type": "resize", "cols": 100, "rows": 30}))
@@ -241,7 +255,7 @@ async def test_resize_control_frame_reaches_the_shell(servers):
 @requires_docker_introspection
 async def test_unknown_control_frames_are_ignored(servers):
     """Hill90's client sends {"type":"ping"}; the server must tolerate it."""
-    async with websockets.connect(_ws_url(servers["on"], TOKEN)) as ws:
+    async with _connect(servers["on"], TOKEN) as ws:
         await _drain(ws, 2.0)
 
         await ws.send(json.dumps({"type": "ping"}))
@@ -261,7 +275,7 @@ async def test_the_shell_does_not_inherit_the_auth_token(servers):
     _child_env() builds the environment explicitly rather than inheriting,
     precisely so a terminal session cannot read the secret that let it in.
     """
-    async with websockets.connect(_ws_url(servers["on"], TOKEN)) as ws:
+    async with _connect(servers["on"], TOKEN) as ws:
         await _drain(ws, 2.0)
         await ws.send(b"echo TOKEN_IS[$AGENTBOX_AUTH_TOKEN]\n")
         output = await _drain(ws, 6.0)
@@ -288,7 +302,7 @@ async def test_shell_processes_do_not_leak_across_sessions(servers):
     before = shell_count()
 
     for _ in range(3):
-        async with websockets.connect(_ws_url(servers["on"], TOKEN)) as ws:
+        async with _connect(servers["on"], TOKEN) as ws:
             await _drain(ws, 1.0)
             await ws.send(b"echo cycle\n")
             await _drain(ws, 2.0)
@@ -324,7 +338,7 @@ def test_server_process_does_not_run_as_root(servers):
 async def test_the_shell_is_not_root(servers):
     """A root PTY is a materially worse thing to hand out than an
     unprivileged one. This is the test that keeps it that way."""
-    async with websockets.connect(_ws_url(servers["on"], TOKEN)) as ws:
+    async with _connect(servers["on"], TOKEN) as ws:
         await _drain(ws, 2.0)
         await ws.send(b"id -u; id -un\n")
         output = await _drain(ws, 6.0)
@@ -338,7 +352,7 @@ async def test_the_shell_is_not_root(servers):
 async def test_the_shell_can_write_to_the_workspace(servers):
     """Dropping root must not cost the shell its own workspace — the
     entrypoint chowns the volume precisely so this keeps working."""
-    async with websockets.connect(_ws_url(servers["on"], TOKEN)) as ws:
+    async with _connect(servers["on"], TOKEN) as ws:
         await _drain(ws, 2.0)
         await ws.send(b"touch /workspace/.perm-check && echo WRITABLE\n")
         output = await _drain(ws, 6.0)
@@ -349,7 +363,7 @@ async def test_the_shell_can_write_to_the_workspace(servers):
 async def test_no_zsh_first_run_wizard(servers):
     """zsh runs zsh-newuser-install when ~/.zshrc is missing, which eats
     the opening keystrokes of a session. theme/zshrc exists to stop it."""
-    async with websockets.connect(_ws_url(servers["on"], TOKEN)) as ws:
+    async with _connect(servers["on"], TOKEN) as ws:
         opening = await _drain(ws, 3.0)
         assert b"newuser" not in opening.lower(), opening[-400:]
         assert b"Aborting" not in opening, opening[-400:]
@@ -363,9 +377,89 @@ async def test_no_zsh_first_run_wizard(servers):
 @requires_docker_introspection
 async def test_the_shell_gets_the_tmux_theme(servers):
     """The Tokyo Night config has to be found in the new HOME."""
-    async with websockets.connect(_ws_url(servers["on"], TOKEN)) as ws:
+    async with _connect(servers["on"], TOKEN) as ws:
         await _drain(ws, 2.0)
         await ws.send(b"tmux show -g status-position; tmux show -gq @theme_variation\n")
         output = await _drain(ws, 6.0)
         assert b"top" in output, output[-300:]
         assert b"night" in output, output[-300:]
+
+
+# ── credential must not travel in the URL (RFC 9700 §4.3.2) ──────────
+
+@requires_docker_introspection
+async def test_token_in_query_string_is_refused(servers):
+    """Not merely discouraged — refused, so the old shape cannot linger.
+
+    RFC 9700 (BCP 240) §4.3.2: "Clients MUST NOT pass access tokens in a
+    URI query parameter." Honouring it would keep the violation alive for
+    anyone still using it, and URLs reach access logs and history.
+    """
+    with pytest.raises(Exception) as exc:
+        async with websockets.connect(f"{_ws_url(servers['on'])}?token={TOKEN}"):
+            pass
+    _assert_handshake_rejected(exc.value)
+
+
+@requires_docker_introspection
+def test_the_ui_never_puts_the_token_in_the_websocket_url(servers):
+    src = (REPO_ROOT / "src" / "ui.html").read_text()
+    assert "?token=" not in src, "UI still builds a token-bearing WebSocket URL"
+    assert '"type": "auth"' in src or '"auth"' in src, "UI has no post-connect auth"
+
+
+# ── browser path: auth as the first message ─────────────────────────
+
+@requires_docker_introspection
+async def test_browser_style_post_connect_auth(servers):
+    """Browsers cannot set headers, so the token goes in message one."""
+    async with websockets.connect(_ws_url(servers["on"])) as ws:
+        hello = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+        assert hello["type"] == "auth_required", hello
+
+        await ws.send(json.dumps({"type": "auth", "token": TOKEN}))
+        ok = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+        assert ok["type"] == "auth_ok", ok
+
+        await _drain(ws, 2.0)
+        await ws.send(b"echo post-connect-auth-works\n")
+        out = await _drain(ws, 6.0)
+        assert b"post-connect-auth-works" in out, out[-300:]
+
+
+@requires_docker_introspection
+async def test_post_connect_auth_rejects_a_wrong_token(servers):
+    async with websockets.connect(_ws_url(servers["on"])) as ws:
+        await asyncio.wait_for(ws.recv(), timeout=10)
+        await ws.send(json.dumps({"type": "auth", "token": WRONG_TOKEN}))
+        with pytest.raises(Exception):
+            await asyncio.wait_for(ws.recv(), timeout=10)
+    assert ws.close_code == 4001, ws.close_code
+
+
+@requires_docker_introspection
+async def test_no_pty_is_spawned_before_auth(servers):
+    """The ttyd pre-auth RCE (NCC Group 2017) was exactly this: the
+    handshake was authenticated but the receive path was not. Sending
+    shell input before authenticating must reach no shell."""
+    async with websockets.connect(_ws_url(servers["on"])) as ws:
+        await asyncio.wait_for(ws.recv(), timeout=10)   # auth_required
+        await ws.send(b"echo SHOULD-NEVER-RUN > /workspace/preauth.txt\n")
+        await asyncio.sleep(1.0)
+
+    check = subprocess.run(
+        ["docker", "exec", "agentbox-terminal-on", "test", "-f", "/workspace/preauth.txt"],
+        capture_output=True,
+    )
+    assert check.returncode != 0, "pre-auth input reached a shell"
+
+
+@requires_docker_introspection
+async def test_unauthenticated_socket_times_out(servers):
+    """The pre-auth window must not be held open indefinitely."""
+    async with websockets.connect(_ws_url(servers["on"])) as ws:
+        await asyncio.wait_for(ws.recv(), timeout=10)   # auth_required
+        with pytest.raises(Exception):
+            # AUTH_TIMEOUT is 10s server-side; wait past it.
+            await asyncio.wait_for(ws.recv(), timeout=20)
+    assert ws.close_code == 4001, ws.close_code

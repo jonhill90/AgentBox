@@ -10,7 +10,13 @@ services:
     container_name: agentbox
 
     ports:
-      - "${AGENTBOX_PORT:-8054}:8000"
+      # Bound to loopback, not 0.0.0.0. Docker's docs: "Publishing
+      # container ports is insecure by default... the Docker daemon
+      # publishes ports to all host addresses". On Linux this also
+      # bypasses ufw (nat table, before INPUT), so the bind address is
+      # the control, not the host firewall. Override AGENTBOX_BIND to
+      # expose deliberately.
+      - "${AGENTBOX_BIND:-127.0.0.1}:${AGENTBOX_PORT:-8054}:8000"
 
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-info}
@@ -24,6 +30,13 @@ services:
       # Set it and every MCP tool and /api/* route needs
       # `Authorization: Bearer <token>`; /health stays open.
       - AGENTBOX_AUTH_TOKEN=${AGENTBOX_AUTH_TOKEN:-}
+      # Preferred over the variable above: point at a file (e.g. a Compose
+      # secret at /run/secrets/...) so the value never appears in
+      # `docker inspect`. Set one or the other, not both.
+      - AGENTBOX_AUTH_TOKEN_FILE=${AGENTBOX_AUTH_TOKEN_FILE:-}
+      # Set to the outgoing token during a rotation; both are accepted
+      # while both are set. Clear it when every client has moved.
+      - AGENTBOX_AUTH_TOKEN_PREVIOUS=${AGENTBOX_AUTH_TOKEN_PREVIOUS:-}
       # Terminal (SPEC §15). Its own flag, and the only one that defaults
       # OFF — it is a shell, not a structured tool. Requires
       # AGENTBOX_AUTH_TOKEN as well: the WebSocket is fail-closed and

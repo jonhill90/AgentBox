@@ -32,15 +32,52 @@ The same token is what the terminal's WebSocket will check as
 mechanisms.
 """
 
+import hashlib
 import json
 import logging
 import os
+import pathlib
 import secrets
 
 logger = logging.getLogger(__name__)
 
+def _read_secret(name: str) -> str:
+    """Read a secret from `<NAME>_FILE` if set, else from `<NAME>`.
+
+    The `*_FILE` convention is the Docker Official Images idiom (postgres,
+    mysql, mariadb all use it) and is what Docker's own Compose docs point
+    at instead of environment variables: "If you're injecting passwords and
+    API keys as environment variables, you risk unintentional information
+    exposure."
+
+    That risk is not hypothetical here — an env var is returned verbatim in
+    `docker inspect` output to anyone with Docker socket access. With the
+    file form the env var holds only a path, which is harmless to leak.
+    Pair it with a Compose `secrets:` block, which mounts the value at
+    /run/secrets/<name>.
+    """
+    path = os.environ.get(f"{name}_FILE", "").strip()
+    if path:
+        try:
+            return pathlib.Path(path).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            logger.error(f"Cannot read {name}_FILE at {path}: {exc}")
+            return ""
+    return os.environ.get(name, "").strip()
+
+
 # Read once at startup, like every other setting in this server.
-AUTH_TOKEN = os.environ.get("AGENTBOX_AUTH_TOKEN", "").strip()
+AUTH_TOKEN = _read_secret("AGENTBOX_AUTH_TOKEN")
+
+# A second, simultaneously-valid token, so rotation is a non-event.
+#
+# Without an overlap window, rotating means downtime plus coordinated
+# reconfiguration of every client, so in practice it never happens and the
+# "rotation policy" stays theoretical. Set PREVIOUS to the outgoing value,
+# move clients across one at a time, then clear it. Both are accepted while
+# both are set. OWASP: "You should regularly rotate secrets so that any
+# stolen credentials will only work for a short time."
+AUTH_TOKEN_PREVIOUS = _read_secret("AGENTBOX_AUTH_TOKEN_PREVIOUS")
 
 UNAUTHORIZED_ERROR = "Unauthorized: missing or invalid Bearer token"
 
@@ -62,6 +99,12 @@ def auth_enabled() -> bool:
     return bool(AUTH_TOKEN)
 
 
+def token_fingerprint(token: str) -> str:
+    """A short SHA-256 prefix, safe to log — tells you WHICH token was used
+    without the log itself becoming a credential store."""
+    return hashlib.sha256(token.encode()).hexdigest()[:12] if token else "-"
+
+
 def check_token(token: str | None) -> bool:
     """Compare a bare token against AGENTBOX_AUTH_TOKEN.
 
@@ -73,12 +116,16 @@ def check_token(token: str | None) -> bool:
 
     This is the one comparison in the codebase. The HTTP path reaches it
     through `check_bearer` (which strips the header prefix first) and
-    the terminal WebSocket reaches it directly with a `?token=` query
-    param, exactly as Hill90 reuses WORK_TOKEN across both.
+    the terminal WebSocket reaches it directly, either from an
+    Authorization header or from its post-connect auth message.
     """
     if not AUTH_TOKEN or not token:
         return False
-    return secrets.compare_digest(token, AUTH_TOKEN)
+    # Both compared unconditionally — no short-circuit, so the number of
+    # comparisons does not depend on which token matched.
+    current = secrets.compare_digest(token, AUTH_TOKEN)
+    previous = bool(AUTH_TOKEN_PREVIOUS) and secrets.compare_digest(token, AUTH_TOKEN_PREVIOUS)
+    return current or previous
 
 
 def check_bearer(authorization: str | None) -> bool:
@@ -135,9 +182,12 @@ def mcp_request_authorized() -> bool:
 
 def log_startup_state() -> None:
     if auth_enabled():
+        source = "file" if os.environ.get("AGENTBOX_AUTH_TOKEN_FILE") else "env"
+        extra = " (+1 previous token accepted for rotation)" if AUTH_TOKEN_PREVIOUS else ""
         logger.info(
-            "Auth ENABLED (AGENTBOX_AUTH_TOKEN): MCP tools and /api/* require "
-            "a Bearer token; /health, /ui and /api/auth-required stay open"
+            f"Auth ENABLED (from {source}, fingerprint {token_fingerprint(AUTH_TOKEN)})"
+            f"{extra}: MCP tools and /api/* require a Bearer token; "
+            "/health, /ui and /api/auth-required stay open"
         )
     else:
         logger.info("Auth DISABLED (no AGENTBOX_AUTH_TOKEN): all endpoints are open")

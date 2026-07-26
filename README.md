@@ -57,6 +57,11 @@ Configuration lives in `.env` and is read by `docker-compose.yml`:
 | `LOG_LEVEL` | `info` | Server log level |
 | `AGENTBOX_ENABLE_JUMPBOX_TOOLS` | `true` | Register the filesystem/git/http tools (see below) |
 | `AGENTBOX_AUTH_TOKEN` | *(empty)* | Shared secret. Empty = no auth (see below) |
+| `AGENTBOX_AUTH_TOKEN_FILE` | *(empty)* | Read the secret from a file instead — preferred |
+| `AGENTBOX_AUTH_TOKEN_PREVIOUS` | *(empty)* | Outgoing token, accepted during a rotation |
+| `AGENTBOX_BIND` | `127.0.0.1` | Host interface to publish on |
+| `AGENTBOX_ALLOWED_HOSTS` | `localhost,127.0.0.1,[::1],0.0.0.0` | DNS-rebinding allowlist |
+| `AGENTBOX_ALLOWED_ORIGINS` | *(same-host)* | Extra browser origins to accept |
 | `AGENTBOX_ENABLE_TERMINAL` | `false` | Register the PTY WebSocket (see below) |
 
 The compose file defines one service, no external network, and two named volumes:
@@ -191,6 +196,44 @@ WebSocket will check the same secret as a `?token=` param when it exists.
 
 The comparison is constant-time (`secrets.compare_digest`).
 
+### Secret handling
+
+Prefer `AGENTBOX_AUTH_TOKEN_FILE` over `AGENTBOX_AUTH_TOKEN`. An environment
+variable is returned verbatim by `docker inspect` to anyone with Docker socket
+access; with the file form the variable holds only a path. Docker's own guidance:
+*"If you're injecting passwords and API keys as environment variables, you risk
+unintentional information exposure."* Pair it with a Compose `secrets:` block:
+
+```yaml
+services:
+  agentbox:
+    environment:
+      - AGENTBOX_AUTH_TOKEN_FILE=/run/secrets/agentbox_token
+    secrets:
+      - agentbox_token
+secrets:
+  agentbox_token:
+    file: ./secrets/agentbox_token
+```
+
+The startup log prints a SHA-256 fingerprint, never the secret.
+
+**Rotating without downtime:** set `AGENTBOX_AUTH_TOKEN` to the new value and
+`AGENTBOX_AUTH_TOKEN_PREVIOUS` to the old one. Both are accepted while both are
+set, so clients can move across one at a time; clear `PREVIOUS` when they have.
+Without that overlap, rotation needs coordinated downtime — which is why, in
+practice, it never happens.
+
+### DNS-rebinding guard
+
+Every HTTP and WebSocket request has its `Origin` **and** `Host` checked against
+an allowlist; mismatches get a 403. The MCP transports spec requires the Origin
+check; the Host check is what actually stops DNS rebinding, where an attacker's
+page resolves their own hostname to `127.0.0.1` and drives this server through
+your browser. That was a real CVE against Shellinabox (CVE-2015-8400), and it is
+why binding to loopback is not by itself a defence. Requests with no `Origin`
+(curl, MCP clients) are allowed — browsers always send one cross-origin.
+
 ## Terminal
 
 A real PTY over a WebSocket at `/terminal`, with an xterm.js panel in `/ui`.
@@ -210,6 +253,22 @@ to `false` — everything else is a structured tool; this one is a shell.
 AGENTBOX_ENABLE_TERMINAL=true AGENTBOX_AUTH_TOKEN=some-secret docker compose up -d
 # then open /ui and click Terminal
 ```
+
+**The token is never in the URL.** RFC 9700 (BCP 240) §4.3.2: *"Clients MUST NOT
+pass access tokens in a URI query parameter"* — URLs reach access logs, proxy
+traces and browser history, and the same secret guards the HTTP surface. Two
+supported paths instead:
+
+- **Machine clients:** `Authorization: Bearer <token>` on the handshake, checked
+  *before* `accept()`, so an unauthorised client never gets a socket.
+- **Browsers** (which cannot set WebSocket headers): the server accepts, sends
+  `{"type":"auth_required"}`, and the client replies
+  `{"type":"auth","token":"..."}` within 10 seconds.
+
+A `?token=` query parameter is **refused**, not honoured, so the old shape cannot
+quietly persist. No PTY is spawned until authentication succeeds — ttyd ≤1.3.0
+authenticated its handshake but not its receive path, which was a pre-auth RCE,
+and there is a test asserting shell input sent before auth reaches nothing.
 
 Wire format: binary frames are raw terminal I/O, text frames are JSON control
 messages (`{"type":"resize","cols":N,"rows":N}`). Unknown control frames are
@@ -376,6 +435,10 @@ Chromium page survives real tool calls.
   the child's terminal size, tolerance of unknown control frames, the auth token
   not leaking into the shell, and no shell processes leaking across sessions.
   Needs `pip install websockets`.
+- `tests/test_hardening.py` — the DNS-rebinding guard (foreign Origin and Host
+  both 403, substring-alike hostnames rejected, no-Origin still allowed), the
+  file-based secret (accepted, and absent from `docker inspect`), and the
+  rotation overlap (both tokens valid at once).
 - `tests/test_auth.py` — auth off by default, and with a second container
   running `AGENTBOX_AUTH_TOKEN`: every `/api/*` route and MCP tool refused
   without a token, refused with a wrong one, refused with a raw token lacking

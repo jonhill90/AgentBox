@@ -26,7 +26,7 @@ import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
-from conftest import CONTAINER, rest_get, requires_docker_introspection
+from conftest import CONTAINER, requires_auth_off, requires_docker_introspection, rest_get
 
 TOKEN = "test-token-1a2b3c4d"
 WRONG_TOKEN = "test-token-wrong"
@@ -106,6 +106,7 @@ async def _call_tool(url: str, name: str, args: dict, token: str | None = None):
 
 # ── auth OFF: the default this whole suite runs under ────────────────
 
+@requires_auth_off
 async def test_auth_reports_itself_off_by_default():
     status, body = await rest_get("/api/auth-required")
     assert status == 200, body
@@ -115,6 +116,7 @@ async def test_auth_reports_itself_off_by_default():
     )
 
 
+@requires_auth_off
 async def test_api_routes_need_no_token_by_default():
     status, body = await rest_get("/api/screenshot")
     assert status in (200, 404), f"unexpected gate on the default build: {status} {body}"
@@ -282,6 +284,7 @@ def test_startup_log_states_that_auth_is_on(authed_server):
     assert "Auth ENABLED" in combined, combined[-2000:]
 
 
+@requires_auth_off
 def test_default_container_logs_auth_disabled():
     logs = subprocess.run(
         ["docker", "logs", CONTAINER], capture_output=True, text=True, check=True,

@@ -545,9 +545,11 @@ tabEls.browser.addEventListener("click", () => activateTab("browser"));
 tabEls.terminal.addEventListener("click", () => activateTab("terminal"));
 
 function termWsUrl() {
+  // No token in the URL: RFC 9700 4.3.2 makes that a MUST NOT, and URLs
+  // land in logs and history. The browser WebSocket API cannot set
+  // headers, so the token goes in the first message instead.
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-  const token = storedToken();
-  return `${scheme}//${location.host}/terminal` + (token ? `?token=${encodeURIComponent(token)}` : "");
+  return `${scheme}//${location.host}/terminal`;
 }
 
 function sendTermResize() {
@@ -582,17 +584,41 @@ function connectTerm() {
   ws.onopen = () => {
     term.reconnects = 0;
     term.openedOnce = true;
+    // Nothing is sent here. The server may still be challenging us, and
+    // its first message must be answered with auth — anything else and
+    // we would be talking over our own handshake. Resize and keep-alive
+    // start in startTermSession(), once auth_ok lands.
+    setTermState("Authenticating…", "busy");
+  };
+
+  function startTermSession() {
     setTermState(term.controlling ? "Controlling" : "Observing", true);
     sendTermResize();
     if (term.ping) clearInterval(term.ping);
     term.ping = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "ping" }));
     }, TERM_PING_MS);
-  };
+  }
 
   ws.onmessage = (event) => {
-    term.xterm.write(event.data instanceof ArrayBuffer
-      ? new Uint8Array(event.data) : event.data);
+    // Control frames arrive as text and are JSON; terminal output is
+    // binary. Only the auth handshake uses text, so anything textual is
+    // parsed as control and never written to the screen as-is.
+    if (typeof event.data === "string") {
+      let msg = null;
+      try { msg = JSON.parse(event.data); } catch { /* not control */ }
+      if (msg && msg.type === "auth_required") {
+        ws.send(JSON.stringify({ type: "auth", token: storedToken() }));
+        return;
+      }
+      if (msg && msg.type === "auth_ok") {
+        startTermSession();
+        return;
+      }
+      term.xterm.write(event.data);
+      return;
+    }
+    term.xterm.write(new Uint8Array(event.data));
   };
 
   ws.onclose = (event) => {
