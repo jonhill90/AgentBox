@@ -51,3 +51,6 @@ screenshots/
 
 # Logs
 *.log
+
+# Local secrets (never committed)
+secrets/
