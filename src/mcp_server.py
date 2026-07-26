@@ -57,6 +57,13 @@ def _env_flag(name: str, default: str = "true") -> bool:
 
 JUMPBOX_TOOLS_ENABLED = _env_flag("AGENTBOX_ENABLE_JUMPBOX_TOOLS")
 
+# The terminal gets its OWN flag (SPEC §14 item 4): a PTY is a
+# categorically different risk from a path-scoped file read, and sharing
+# a flag would make "filesystem on, PTY off" inexpressible. It is also
+# the one toggle that defaults OFF, including for local dev — every
+# other capability here is a structured tool; this one is a shell.
+TERMINAL_ENABLED = _env_flag("AGENTBOX_ENABLE_TERMINAL", default="false")
+
 
 # ── Auth wiring (SPEC §12) ───────────────────────────────────────────
 #
@@ -832,6 +839,41 @@ else:
     logger.info(
         "Jumpbox tools DISABLED (AGENTBOX_ENABLE_JUMPBOX_TOOLS): "
         "filesystem, git and http_request tools are not registered"
+    )
+
+
+# ── Terminal WebSocket (SPEC §15), gated by its own toggle ───────────
+#
+# mcp.custom_route() builds a Starlette Route and is HTTP-only, so it
+# cannot carry a WebSocket. streamable_http_app() does
+# `routes.extend(self._custom_starlette_routes)` on a plain list, so a
+# WebSocketRoute appended there is served alongside everything else and
+# mcp.run(transport="streamable-http") stays intact.
+#
+# That attribute is private. tests/test_terminal.py asserts the route is
+# actually reachable, so an SDK bump that renames it fails loudly rather
+# than silently dropping the terminal.
+
+if TERMINAL_ENABLED:
+    from starlette.routing import WebSocketRoute
+
+    import terminal
+
+    mcp._custom_starlette_routes.append(
+        WebSocketRoute("/terminal", endpoint=terminal.terminal_websocket)
+    )
+
+    if auth.auth_enabled():
+        logger.info("Terminal ENABLED (AGENTBOX_ENABLE_TERMINAL): ws://.../terminal")
+    else:
+        logger.warning(
+            "Terminal ENABLED but AGENTBOX_AUTH_TOKEN is not set — every "
+            "connection will be refused with 4001. The terminal is fail-closed "
+            "by design (SPEC §15.3); set a token to use it."
+        )
+else:
+    logger.info(
+        "Terminal DISABLED (AGENTBOX_ENABLE_TERMINAL): no /terminal route registered"
     )
 
 

@@ -41,6 +41,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
+# tmux and zsh back the terminal (SPEC §15). tmux matters beyond taste:
+# `new-session -A` reattaches, so a dropped WebSocket resumes the session
+# instead of losing it. Installed unconditionally; the terminal route is
+# still gated by AGENTBOX_ENABLE_TERMINAL.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tmux \
+    zsh \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install Python dependencies
 COPY pyproject.toml ./
 RUN pip install --no-cache-dir -e .

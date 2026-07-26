@@ -9,7 +9,7 @@ appear on the MCP surface at all. Importing this module is harmless on
 its own; it grants nothing until something registers a call site.
 
 Ported from Hill90 (read-only reference,
-`/Users/jon/source/repos/Personal/Hill90/services/agentbox/app/`):
+`/Users/jon/source/repos/Personal/hill90-app/services/agentbox/app/`):
 
   - `filesystem.py`  → `read_file`, `write_file`, `list_directory`
   - `tools.py::_execute_git`           → `execute_git`

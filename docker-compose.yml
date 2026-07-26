@@ -24,6 +24,11 @@ services:
       # Set it and every MCP tool and /api/* route needs
       # `Authorization: Bearer <token>`; /health stays open.
       - AGENTBOX_AUTH_TOKEN=${AGENTBOX_AUTH_TOKEN:-}
+      # Terminal (SPEC §15). Its own flag, and the only one that defaults
+      # OFF — it is a shell, not a structured tool. Requires
+      # AGENTBOX_AUTH_TOKEN as well: the WebSocket is fail-closed and
+      # refuses every connection with 4001 when no token is configured.
+      - AGENTBOX_ENABLE_TERMINAL=${AGENTBOX_ENABLE_TERMINAL:-false}
 
     deploy:
       resources:

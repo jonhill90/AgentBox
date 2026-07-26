@@ -62,24 +62,35 @@ def auth_enabled() -> bool:
     return bool(AUTH_TOKEN)
 
 
+def check_token(token: str | None) -> bool:
+    """Compare a bare token against AGENTBOX_AUTH_TOKEN.
+
+    No configured token means deny — the same fail-closed rule Hill90's
+    `_check_auth` applies. The comparison is constant-time; Hill90 uses
+    `==`, and for a locally-reachable box the difference is academic,
+    but there is no reason to hand out a timing oracle on a shared
+    secret.
+
+    This is the one comparison in the codebase. The HTTP path reaches it
+    through `check_bearer` (which strips the header prefix first) and
+    the terminal WebSocket reaches it directly with a `?token=` query
+    param, exactly as Hill90 reuses WORK_TOKEN across both.
+    """
+    if not AUTH_TOKEN or not token:
+        return False
+    return secrets.compare_digest(token, AUTH_TOKEN)
+
+
 def check_bearer(authorization: str | None) -> bool:
     """Validate an Authorization header against AGENTBOX_AUTH_TOKEN.
 
     Mirrors Hill90's `_check_auth`: no configured token means deny,
     the `Bearer ` prefix is required, and the remainder must match.
-
-    The comparison is constant-time. Hill90 uses `==`; for a
-    locally-reachable box the difference is academic, but there is no
-    reason to hand out a timing oracle on a shared secret.
     """
-    if not AUTH_TOKEN:
-        return False
-
     if not authorization or not authorization.startswith("Bearer "):
         return False
 
-    token = authorization[7:]  # len("Bearer ") == 7
-    return secrets.compare_digest(token, AUTH_TOKEN)
+    return check_token(authorization[7:])  # len("Bearer ") == 7
 
 
 def authorization_from_mcp_request() -> str | None:

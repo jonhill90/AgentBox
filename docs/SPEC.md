@@ -16,7 +16,7 @@ it's told to navigate to. Runs on the operator's machine via
 
 Port — do not rewrite from scratch — the persistent-loop browser tool
 from Hill90's `services/agentbox/app/tools.py`
-(`/Users/jon/source/repos/Personal/Hill90/services/agentbox/app/tools.py`,
+(`/Users/jon/source/repos/Personal/hill90-app/services/agentbox/app/tools.py`,
 read-only reference; do not modify that repo). Specifically bring
 over:
 
@@ -162,7 +162,7 @@ host) is a small config change later, not a redesign.
 ## 8. Filesystem and git tools (PRD 1.7)
 
 Port, don't rewrite, from Hill90 (read-only reference —
-`/Users/jon/source/repos/Personal/Hill90/services/agentbox/app/`):
+`/Users/jon/source/repos/Personal/hill90-app/services/agentbox/app/`):
 
 - `filesystem.py` → `read_file`, `write_file`, `list_directory`. Port
   `PathPolicy` from Hill90's `policy.py` alongside it (realpath-resolved
