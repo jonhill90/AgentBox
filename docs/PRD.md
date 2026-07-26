@@ -269,11 +269,11 @@ or a header-based connector sits in front of, not something thrown away.
 - Missing/wrong token: a clear 401 with a structured error, not a
   silent failure or a raw exception.
 
-### 1.11 Interactive terminal (DRAFT — for review)
+### 1.11 Interactive terminal — BUILT
 
-> **Drafted by Claude for your review, not yet authoritative.** Grounded in
-> the actual sources in `hill90-app` (see SPEC §15); the three decisions
-> that need your call are marked **DECISION** below.
+> **Status: built and tested.** Drafted with four open decisions; all
+> four were resolved conservatively and implemented. See SPEC §15 for
+> what exists and `tests/test_terminal.py` for what is proven.
 
 **User story:** As the operator, I want a real shell inside AgentBox that
 I can watch and type into from the same `/ui` page that already shows me
@@ -303,23 +303,20 @@ the box; it is one more capability behind one more flag.
 - Authenticated with the **same** `AGENTBOX_AUTH_TOKEN` from 1.10, as a
   `?token=` query param, exactly as Hill90's `ws_terminal_handler` reuses
   `WORK_TOKEN`. One secret, not a second mechanism.
-- **DECISION 1 — fail-closed when no token is set.** Hill90 refuses the
-  socket outright when `WORK_TOKEN` is unset, so it is never exposed
-  unauthenticated even to itself (SPEC §14 item 6 records this as the
-  precedent to carry over). AgentBox's auth is off by default, so
-  mirroring that means the terminal simply does not work until
-  `AGENTBOX_AUTH_TOKEN` is set — even locally. Recommended: mirror it.
-  The alternative (open when auth is off, like every other surface here)
-  is more consistent with the rest of the box but hands a root shell to
-  anything that can reach the port.
-- **DECISION 2 — default off, even for local dev.** Every other toggle
-  defaults on locally. This one is a shell; recommended default is
-  `false`, so turning it on is always an explicit act.
-- **DECISION 3 — who the shell runs as.** The container currently runs
-  as root, and Hill90's PTY drops into a dedicated `agentuser` with a
-  scrubbed environment. A root PTY is a materially worse thing to
-  expose than Hill90's. Recommended: add a non-root user for the shell
-  before this ships.
+- **Fail closed when no token is set.** Hill90 refuses the socket
+  outright when `WORK_TOKEN` is unset, so it is never exposed
+  unauthenticated even to itself (SPEC §14 item 6). AgentBox mirrors
+  that: the terminal does not work until `AGENTBOX_AUTH_TOKEN` is set,
+  even locally, and the server warns at startup if it is enabled
+  without one.
+- **Default off, even for local dev.** Every other toggle defaults on
+  locally. This one is a shell, so turning it on is always an explicit
+  act.
+- **The shell is not root.** The container runs as an `agentbox` user
+  (uid 1000) that owns the workspace, the screenshots volume and the
+  browser cache; an entrypoint fixes volume ownership and then drops
+  privileges. This matches Hill90's `agentuser` and means the PTY hands
+  out an unprivileged shell.
 - An xterm.js panel in `/ui`, alongside the browser view, mirroring
   `XTerminal.tsx`: read-only "Observing" by default, with a Take
   Control toggle that enables stdin — the same two-state model the

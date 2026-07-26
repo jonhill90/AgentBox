@@ -236,12 +236,12 @@ socket is ever opened — and the client treats that as "do not retry".
 The shell's environment is built explicitly rather than inherited, so a terminal
 session cannot read `AGENTBOX_AUTH_TOKEN` out of the server process.
 
-> **Known limitation: this is a root shell.** The container runs as root, where
-> Hill90's equivalent drops to a dedicated `agentuser`. Fixing it touches
-> `/workspace` ownership, the Playwright browser cache and the screenshots
-> volume, so it is deliberately its own change (SPEC §15.6). Until then, the two
-> gates above are what stands in front of it — which is why the toggle defaults
-> off and the auth is fail-closed.
+**The shell is not root.** The container runs as an unprivileged `agentbox`
+user (uid 1000) which owns `/workspace`, the screenshots volume and the
+Playwright browser cache. `docker-entrypoint.sh` fixes volume ownership as root
+and then drops privileges with `setpriv --inh-caps=-all` before the server
+starts, so a volume created by an older root-running build keeps working. This
+matches Hill90's `agentuser`.
 
 xterm.js is **vendored** into `src/vendor/`, not loaded from a CDN, so `/ui`
 keeps working with no outbound network and no build step.
@@ -389,10 +389,11 @@ Chromium page survives real tool calls.
 ## Architecture
 
 ```
-python:3.12-slim-bookworm
+python:3.12-slim-bookworm  (runs as `agentbox`, uid 1000 — not root)
 ├── Chromium system libs (apt — see Dockerfile)
 ├── Playwright + Chromium browser (/data/browsers)
-├── Python deps (fastmcp, pydantic, uvicorn, playwright)
+├── tmux + zsh, Tokyo Night theme pinned to fcfde9a
+├── Python deps (fastmcp, pydantic, uvicorn, playwright, httpx)
 └── src/
     ├── auth.py           (Bearer token check — SPEC §12)
     ├── terminal.py       (PTY WebSocket relay — SPEC §15)
@@ -412,6 +413,9 @@ now resolves to trixie, where `libasound2` is renamed `libasound2t64` and the
 package list in `SPEC.md` §4 fails to install.
 
 ### Known limitations (Phase 1, accepted)
+
+- **No multi-user story.** One shared browser page, one shared workspace, one
+  shared token. This is a single-operator box.
 
 - **One page, one client.** All callers share a single page, so two clients
   driving it at once will interfere. That is the point for the viewer — you and
@@ -440,7 +444,9 @@ docker compose restart                 # restart — also gives a fresh browser
 
 ```
 agentbox/
-├── Dockerfile              # Debian slim + Playwright/Chromium
+├── Dockerfile              # Debian slim + Playwright/Chromium + tmux/zsh
+├── docker-entrypoint.sh    # fixes volume ownership, then drops root
+├── theme/                  # tmux Tokyo Night + zshrc (SPEC §15.6)
 ├── docker-compose.yml      # single service, local only
 ├── pyproject.toml          # Python dependencies + pytest config
 ├── .env.example            # AGENTBOX_PORT, LOG_LEVEL

@@ -347,11 +347,12 @@ and `ws_terminal_handler`).
    `?token=` query param, exactly like Hill90's `ws_terminal_handler`
    reuses `WORK_TOKEN` — one secret, not a second bespoke one.
 
-## 15. Interactive terminal (PRD 1.11) — DRAFT for review
+## 15. Interactive terminal (PRD 1.11) — BUILT
 
-> **Drafted by Claude, not yet authoritative.** Every Hill90 detail below
-> was read from the sources named here. Points needing your decision are
-> marked **DECISION**; points I could not verify are marked **UNVERIFIED**.
+> **Status: built and tested.** This section started as a draft with four
+> open decisions; all four were resolved conservatively and implemented,
+> and this now records what exists rather than what was proposed. What
+> was chosen, and why, is called out at each point.
 
 **Source has moved.** `hill90-app` now holds this code; the old
 `/Users/jon/source/repos/Personal/Hill90` working tree was emptied when
@@ -413,8 +414,8 @@ it. Do not port it as a bonus.
 
 - `AGENTBOX_ENABLE_TERMINAL`, its own flag (§14 item 4), set explicitly
   in `docker-compose.yml`/`.env.example` like the others.
-  **DECISION:** recommended default `false` even locally — every other
-  toggle defaults on, but this one is a shell.
+  **CHOSEN: defaults `false`**, even locally — every other toggle
+  defaults on, but this one is a shell.
 - When off, the `WebSocketRoute` is not registered. The trip-wire test
   is a connection attempt that fails at the transport, not a 403 from a
   live endpoint.
@@ -422,9 +423,11 @@ it. Do not port it as a bonus.
   small addition: `check_bearer()` takes a full `Authorization` header,
   so factor out a `check_token(raw: str) -> bool` that both it and the
   WebSocket path call. Keep `secrets.compare_digest`.
-- **DECISION:** fail closed when `AGENTBOX_AUTH_TOKEN` is unset, as
-  Hill90 does (`if not work_token or token != work_token`). This is the
-  one place where "auth off means open" should not apply.
+- **CHOSEN: fail closed** when `AGENTBOX_AUTH_TOKEN` is unset, as Hill90
+  does (`if not work_token or token != work_token`). This is the one
+  place where "auth off means open" does not apply. The server logs a
+  warning at startup if the terminal is enabled without a token, so the
+  combination is never silently useless.
 
 ### 15.4 Route registration (verified)
 
@@ -453,23 +456,37 @@ Mirror `XTerminal.tsx`'s model, not its React:
   `ResizeObserver` fire. Keep-alive ping every 30s.
 - Reconnect on close except codes `4001` (auth) and `1000` (clean), up
   to 5 attempts, backoff `min(2000 * n, 10000)`.
-- **DECISION — how xterm.js gets there.** §6 fixed `/ui` as one static
-  page with inline JS, no build step and no new dependencies. xterm.js
-  is ~300KB of npm package. Options: vendor the built `xterm.js` +
-  `xterm.css` into `src/` and serve them as static routes (keeps the
-  no-build-step and works offline, costs a vendored blob in the repo);
-  or load from a CDN (no blob, but breaks the local-only property and
-  fails with no network). Recommended: vendor it.
+- **CHOSEN: vendored.** `src/vendor/` holds `xterm.js`, `xterm.css`,
+  `xterm-addon-fit.js` and a 1KB Nerd Font subset, served by a
+  `/vendor/{name}` route. A CDN would have broken both the no-build-step
+  rule and the local-only property. See `src/vendor/README.md` for
+  versions and how to refresh them.
+- The browser and terminal are **tabs**, not a split pane — each view
+  owns the full height. The terminal's WebSocket stays open while the
+  browser tab is showing, so switching does not drop the session.
 
 ### 15.6 Container changes
 
-- The image has neither tmux nor zsh; add at least tmux if session
-  reattach is wanted.
-- **DECISION:** the container runs as root today, so the PTY would be a
-  root shell. Hill90's drops to `agentuser` with a scrubbed env. Adding
-  a non-root user is recommended before this ships, and is a bigger
-  change than the terminal itself — it touches file ownership for
-  `/workspace`, the Playwright browser cache, and the screenshots volume.
+- tmux and zsh are installed, so the shell is
+  `tmux new-session -A -s agent` and a dropped socket reattaches.
+- The tmux theme is `fabioluciano/tmux-tokyo-night` pinned to `fcfde9a`
+  — the same commit and mods as hill90-app's agentbox — installed into
+  the app user's home with TPM plugins pre-installed at build time, so
+  the first session costs nothing and needs no network.
+- `theme/zshrc` exists mainly so zsh does not run its first-run
+  configuration wizard, which otherwise eats the opening keystrokes of
+  every session. It carries a Tokyo Night prompt with no glyph
+  dependency; Hill90's Powerlevel10k config is deliberately NOT ported,
+  because p10k draws a large Nerd Font glyph set that the vendored
+  1KB subset cannot cover and a CDN font is not an option.
+- **CHOSEN: the container no longer runs as root.** A `agentbox` user
+  (uid 1000) owns `/workspace`, the screenshots volume and the
+  Playwright browser cache, and `docker-entrypoint.sh` drops privileges
+  with `setpriv --inh-caps=-all` after fixing volume ownership. The
+  entrypoint exists rather than a bare `USER` directive because a named
+  volume created by an earlier root-running build stays root-owned; the
+  entrypoint makes the upgrade seamless. The PTY is therefore an
+  unprivileged shell, matching Hill90's `agentuser`.
 
 ### 15.7 Tests
 
@@ -486,3 +503,11 @@ Mirror `XTerminal.tsx`'s model, not its React:
   Chromium.
 - Auth interaction: the terminal's gate is independent of the §12 HTTP
   gate; assert both, since they are different code paths.
+- Privilege: the server process is not root, the shell is not root, the
+  shell can still write `/workspace`, and no zsh wizard appears. These
+  are what stop the non-root property regressing silently.
+
+**Implemented in** `src/terminal.py`, `src/mcp_server.py` (route
+registration and toggle), `src/ui.html` (panel), `theme/`,
+`docker-entrypoint.sh`. **Tested in** `tests/test_terminal.py`
+(20 tests) and `tests/test_ui_api.py`.

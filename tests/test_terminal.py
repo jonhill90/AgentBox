@@ -302,3 +302,70 @@ async def test_shell_processes_do_not_leak_across_sessions(servers):
     assert after <= before + 2, (
         f"shell processes leaked across sessions: {before} -> {after}"
     )
+
+
+# ── privilege (SPEC §15.6) ───────────────────────────────────────────
+
+@requires_docker_introspection
+def test_server_process_does_not_run_as_root(servers):
+    """The whole container dropped root, not just the shell."""
+    out = subprocess.run(
+        ["docker", "top", "agentbox-terminal-on", "-eo", "user,pid,comm"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    server_lines = [ln for ln in out.splitlines()[1:] if "python" in ln]
+    assert server_lines, out
+    for line in server_lines:
+        user = line.split()[0]
+        assert user not in ("root", "0"), f"server is running as root: {line}"
+
+
+@requires_docker_introspection
+async def test_the_shell_is_not_root(servers):
+    """A root PTY is a materially worse thing to hand out than an
+    unprivileged one. This is the test that keeps it that way."""
+    async with websockets.connect(_ws_url(servers["on"], TOKEN)) as ws:
+        await _drain(ws, 2.0)
+        await ws.send(b"id -u; id -un\n")
+        output = await _drain(ws, 6.0)
+
+        assert b"uid=0" not in output, f"the shell is root: {output[-300:]!r}"
+        assert b"agentbox" in output, output[-300:]
+        assert b"\r\n0\r\n" not in output, f"uid 0: {output[-300:]!r}"
+
+
+@requires_docker_introspection
+async def test_the_shell_can_write_to_the_workspace(servers):
+    """Dropping root must not cost the shell its own workspace — the
+    entrypoint chowns the volume precisely so this keeps working."""
+    async with websockets.connect(_ws_url(servers["on"], TOKEN)) as ws:
+        await _drain(ws, 2.0)
+        await ws.send(b"touch /workspace/.perm-check && echo WRITABLE\n")
+        output = await _drain(ws, 6.0)
+        assert b"WRITABLE" in output, output[-300:]
+
+
+@requires_docker_introspection
+async def test_no_zsh_first_run_wizard(servers):
+    """zsh runs zsh-newuser-install when ~/.zshrc is missing, which eats
+    the opening keystrokes of a session. theme/zshrc exists to stop it."""
+    async with websockets.connect(_ws_url(servers["on"], TOKEN)) as ws:
+        opening = await _drain(ws, 3.0)
+        assert b"newuser" not in opening.lower(), opening[-400:]
+        assert b"Aborting" not in opening, opening[-400:]
+
+        # And the very first keystrokes are not swallowed.
+        await ws.send(b"echo first-keystrokes-survive\n")
+        output = await _drain(ws, 6.0)
+        assert b"first-keystrokes-survive" in output, output[-400:]
+
+
+@requires_docker_introspection
+async def test_the_shell_gets_the_tmux_theme(servers):
+    """The Tokyo Night config has to be found in the new HOME."""
+    async with websockets.connect(_ws_url(servers["on"], TOKEN)) as ws:
+        await _drain(ws, 2.0)
+        await ws.send(b"tmux show -g status-position; tmux show -gq @theme_variation\n")
+        output = await _drain(ws, 6.0)
+        assert b"top" in output, output[-300:]
+        assert b"night" in output, output[-300:]

@@ -27,12 +27,11 @@ Gated twice over, and both gates are real:
     "no token" as "auth off". Hill90 does the same and never exposes
     this socket unauthenticated even to itself (SPEC §14 item 6).
 
-KNOWN LIMITATION: the container currently runs as root, so this is a
-root shell. Hill90's equivalent drops to a dedicated `agentuser`. Fixing
-that touches /workspace ownership, the Playwright browser cache and the
-screenshots volume, so it is deliberately a separate change — see
-SPEC §15.6. Until then the two gates above are what stands between the
-port and a root PTY.
+The shell is NOT root. The container runs as the `agentbox` user (uid
+1000) — docker-entrypoint.sh fixes volume ownership and then drops
+privileges with setpriv before the server ever starts — so the PTY
+hands out an unprivileged shell, matching Hill90's `agentuser`.
+tests/test_terminal.py asserts this rather than trusting it.
 """
 
 import asyncio

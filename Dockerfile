@@ -50,19 +50,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zsh \
     && rm -rf /var/lib/apt/lists/*
 
+# Non-root user. The terminal (SPEC §15) hands out a real shell, and a
+# root shell is a materially worse thing to expose than an unprivileged
+# one — Hill90's agentbox drops to `agentuser` for exactly this reason.
+# Everything the server touches at runtime is owned by this user.
+RUN useradd --create-home --shell /bin/zsh --uid 1000 agentbox
+
 # tmux Tokyo Night theme (SPEC §15.5), matching hill90-app's agentbox and
 # Jon's dotfiles. The plugin is pinned to the same commit as both, so the
 # status bar here looks like the status bar there rather than drifting
 # with upstream.
-RUN git clone --depth=1 https://github.com/tmux-plugins/tpm /root/.tmux/plugins/tpm && \
-    git clone https://github.com/fabioluciano/tmux-tokyo-night /root/.tmux/plugins/tmux-tokyo-night && \
-    cd /root/.tmux/plugins/tmux-tokyo-night && git checkout -q fcfde9a
-COPY theme/tmux.conf /root/.tmux.conf
+RUN git clone --depth=1 https://github.com/tmux-plugins/tpm /home/agentbox/.tmux/plugins/tpm && \
+    git clone https://github.com/fabioluciano/tmux-tokyo-night /home/agentbox/.tmux/plugins/tmux-tokyo-night && \
+    cd /home/agentbox/.tmux/plugins/tmux-tokyo-night && git checkout -q fcfde9a
+COPY theme/tmux.conf /home/agentbox/.tmux.conf
+# A .zshrc must exist or zsh runs its first-run setup wizard, which eats
+# the opening keystrokes of every new terminal session.
+COPY theme/zshrc /home/agentbox/.zshrc
+RUN chown -R agentbox:agentbox /home/agentbox
 # Pre-install plugins at build time so the first terminal session does not
 # pay for it (and works with no network at runtime).
-RUN tmux start-server && tmux new-session -d -s build-init && \
-    /root/.tmux/plugins/tpm/bin/install_plugins && \
-    tmux kill-server || true
+RUN su agentbox -s /bin/sh -c 'tmux start-server && tmux new-session -d -s build-init && \
+    /home/agentbox/.tmux/plugins/tpm/bin/install_plugins && tmux kill-server' || true
 
 # Install Python dependencies
 COPY pyproject.toml ./
@@ -75,8 +84,19 @@ RUN playwright install chromium
 # Copy application source
 COPY src/ src/
 
-# Screenshots are written here (mounted as a named volume in compose)
-RUN mkdir -p /workspace/screenshots
+# Screenshots are written here (mounted as a named volume in compose).
+# Ownership is set in the image so a FRESH volume inherits it; the
+# entrypoint fixes volumes that pre-date the non-root switch.
+RUN mkdir -p /workspace/screenshots && \
+    chown -R agentbox:agentbox /workspace /data/browsers
+
+# HOME/USER are read by the terminal when it builds the shell's
+# environment, so they must describe the user the server actually runs as.
+ENV HOME=/home/agentbox
+ENV USER=agentbox
+
+COPY docker-entrypoint.sh /usr/local/bin/agentbox-entrypoint
+RUN chmod +x /usr/local/bin/agentbox-entrypoint
 
 # CRITICAL: Unbuffered output for streaming
 ENV PYTHONUNBUFFERED=1
@@ -87,4 +107,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=10s \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 
+ENTRYPOINT ["/usr/local/bin/agentbox-entrypoint"]
 CMD ["python", "src/mcp_server.py"]

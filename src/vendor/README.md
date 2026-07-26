@@ -31,6 +31,7 @@ bytes. The set was derived by rendering the theme's `status-left`,
 non-ASCII codepoint:
 
     U+2735  ✵     pane-synchronized marker
+    U+276F  ❯     zsh prompt character (theme/zshrc)
     U+E0B0        powerline right separator
     U+E0D7        powerline separator (inverse)
     U+EA85        window icon
@@ -43,5 +44,5 @@ powerline separators and cost nothing.
 To regenerate after a theme change, re-collect the codepoints and:
 
     pyftsubset SymbolsNerdFontMono-Regular.ttf \
-      --unicodes=U+2735,U+E0B0,U+E0B1,U+E0B2,U+E0B3,U+E0D7,U+EA85,U+EB81,U+F11C \
+      --unicodes=U+2735,U+276F,U+E0B0,U+E0B1,U+E0B2,U+E0B3,U+E0D7,U+EA85,U+EB81,U+F11C \
       --flavor=woff2 --output-file=nerd-symbols.woff2 --no-hinting --desubroutinize

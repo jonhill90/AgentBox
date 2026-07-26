@@ -1,0 +1,44 @@
+# AgentBox zsh config.
+#
+# Ported in spirit from hill90-app's services/agentbox/theme/zshrc, minus
+# oh-my-zsh and Powerlevel10k. p10k draws a large set of Nerd Font glyphs
+# and this image vendors only the handful the tmux status bar needs (see
+# src/vendor/README.md), so a p10k prompt would render as tofu boxes in
+# the browser terminal. The prompt below uses the same Tokyo Night palette
+# with no glyph dependency beyond the one arrow, which IS in the subset.
+#
+# Creating this file at all also stops zsh's first-run configuration
+# wizard (zsh-newuser-install), which otherwise hijacks the first
+# keystrokes of every new terminal session.
+
+# History
+HISTFILE=~/.zsh_history
+HISTSIZE=10000
+SAVEHIST=10000
+setopt SHARE_HISTORY HIST_IGNORE_DUPS HIST_IGNORE_SPACE
+
+# Completion
+autoload -Uz compinit && compinit -u
+zstyle ':completion:*' menu select
+zstyle ':completion:*' list-colors ''
+
+# Vim keys, matching the tmux config
+bindkey -v
+bindkey '^R' history-incremental-search-backward
+
+# Tokyo Night prompt: green user, blue cwd, purple git branch.
+autoload -Uz vcs_info
+precmd() { vcs_info }
+zstyle ':vcs_info:git:*' formats ' %F{141}%b%f'
+zstyle ':vcs_info:git:*' actionformats ' %F{141}%b%f %F{209}(%a)%f'
+setopt PROMPT_SUBST
+PROMPT='%F{114}agentbox%f %F{111}%~%f${vcs_info_msg_0_}
+%F{110}❯%f '
+
+export PATH="$HOME/.local/bin:$PATH"
+export EDITOR=vim
+
+# The filesystem and git tools are scoped to /workspace, so start there
+# and keep a symlink in home for convenience.
+[[ ! -L ~/workspace ]] && ln -sf /workspace ~/workspace 2>/dev/null
+cd /workspace 2>/dev/null || true
