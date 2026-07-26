@@ -7,11 +7,22 @@ tool calls. It also ships a **take-control viewer** at `/ui` so you can watch
 that page live and grab the wheel yourself, and — behind a feature toggle —
 workspace-scoped filesystem, git, and SSRF-protected HTTP tools.
 
-**Status: Phase 1** — local Docker only, on the operator's machine. No auth, no
-cloud deployment, no Tailscale. See `docs/PRD.md` and `docs/SPEC.md`.
+**Status: Phase 1** — local Docker only, on the operator's machine. No cloud
+deployment, no Tailscale.
 
-AKM/knowledge tools are permanently out of scope. A real interactive terminal is
-a separate, deliberate build that does not exist yet.
+### Documentation map
+
+| Read this | For |
+|---|---|
+| **`CLAUDE.md`** | Agent orientation — start here if you are an AI working on this repo |
+| `docs/ARCHITECTURE.md` | How the pieces fit together |
+| `docs/SECURITY.md` | Threat model and every security decision, with citations |
+| `docs/DEVELOPMENT.md` | Running, testing, debugging, and the traps |
+| `docs/PRD.md` / `docs/SPEC.md` | What is required, and the scope boundary |
+
+The rest of this file is operator-facing usage.
+
+AKM/knowledge tools are permanently out of scope — not deferred.
 
 ## How the persistence works
 
