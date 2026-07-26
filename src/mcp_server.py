@@ -90,6 +90,15 @@ _playwright_instance: object | None = None
 _browser_last_screenshot: bytes | None = None  # cached PNG (populated on _browser_loop)
 _browser_last_url: str | None = None           # URL captured alongside screenshot
 
+# Guards first-time browser creation. _browser_loop is single-threaded, but
+# _ensure_browser_page_on_loop() awaits several times while launching, and
+# concurrent tool calls interleave at those await points. Without this lock
+# each of them sees _browser_page is None and launches its own Playwright +
+# Chromium, and the last writer's globals clobber the rest — every racing
+# call then fails with "Target page, context or browser has been closed".
+# Only ever acquired from coroutines running on _browser_loop.
+_browser_init_lock = asyncio.Lock()
+
 MAX_TEXT_LENGTH = 4000
 SCREENSHOT_DIR = os.environ.get("SCREENSHOT_DIR", "/workspace/screenshots")
 
@@ -101,22 +110,32 @@ async def _ensure_browser_page_on_loop():
     if _browser_page is not None:
         return _browser_page
 
-    os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+    async with _browser_init_lock:
+        # Re-check: another task may have finished the launch while we
+        # were waiting for the lock.
+        if _browser_page is not None:
+            return _browser_page
 
-    from playwright.async_api import async_playwright
+        os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
-    _playwright_instance = await async_playwright().start()
-    browser = await _playwright_instance.chromium.launch(
-        headless=True,
-        args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
-    )
-    _browser_context = await browser.new_context(
-        viewport={"width": 1280, "height": 720},
-        user_agent="AgentBox/1.0 (Headless Chromium)",
-    )
-    _browser_page = await _browser_context.new_page()
-    logger.info("Browser page created on persistent loop")
-    return _browser_page
+        from playwright.async_api import async_playwright
+
+        instance = await async_playwright().start()
+        browser = await instance.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
+        )
+        context = await browser.new_context(
+            viewport={"width": 1280, "height": 720},
+            user_agent="AgentBox/1.0 (Headless Chromium)",
+        )
+        page = await context.new_page()
+
+        # Publish only once everything is built, so no other task can ever
+        # observe a half-created browser.
+        _playwright_instance, _browser_context, _browser_page = instance, context, page
+        logger.info("Browser page created on persistent loop")
+        return _browser_page
 
 
 async def _capture_live_screenshot_on_loop() -> None:
