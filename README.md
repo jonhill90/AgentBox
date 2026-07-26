@@ -56,6 +56,7 @@ Configuration lives in `.env` and is read by `docker-compose.yml`:
 | `AGENTBOX_PORT` | `8054` | Host port mapped to the container's `8000` |
 | `LOG_LEVEL` | `info` | Server log level |
 | `AGENTBOX_ENABLE_JUMPBOX_TOOLS` | `true` | Register the filesystem/git/http tools (see below) |
+| `AGENTBOX_AUTH_TOKEN` | *(empty)* | Shared secret. Empty = no auth (see below) |
 
 The compose file defines one service, no external network, and two named volumes:
 `agentbox-workspace` → `/workspace` and `agentbox-screenshots` →
@@ -143,6 +144,51 @@ docker compose logs | grep Jumpbox     # "Jumpbox tools DISABLED"
 container with the flag flipped and comparing the real `list_tools()` surface.
 Any deployment profile other than local dev must default this to off, as its own
 reviewed decision (PRD 1.9).
+
+## Auth
+
+Off by default: with `AGENTBOX_AUTH_TOKEN` empty or unset, nothing is gated and
+the server behaves exactly as it did before this existed. The guard is not even
+wired in — the decorators that would attach it are pass-throughs.
+
+Set it to any shared secret and every **MCP tool** and every **`/api/*` route**
+requires `Authorization: Bearer <token>`. Missing, malformed (no `Bearer `
+prefix), or wrong tokens get a structured 401:
+
+```json
+{"success": false, "status": 401, "error": "Unauthorized: missing or invalid Bearer token"}
+```
+
+REST routes send that with an actual HTTP 401; MCP tools return it as their JSON
+result, since a tool result has no status line of its own.
+
+Deliberately left open:
+
+- `GET /health` — the Docker healthcheck target, not a capability (Hill90 leaves
+  it open too). Note the MCP `health` *tool* is gated; only the route is not.
+- `GET /ui` — the page has to load before it can ask for a token.
+- `GET /api/auth-required` — how the page learns whether to prompt. It answers
+  only "yes/no", which a 401 would reveal anyway.
+
+The viewer prompts once when the server reports auth is on, keeps the token in
+`sessionStorage`, and attaches it to every `/api/*` call afterwards. A 401 clears
+it and re-prompts, so a mistyped token is recoverable without a reload.
+
+```bash
+AGENTBOX_AUTH_TOKEN=some-shared-secret docker compose up -d
+curl http://localhost:8054/health                                    # 200, no token
+curl -X POST http://localhost:8054/api/browser/navigate \
+  -H 'Authorization: Bearer some-shared-secret' \
+  -H 'Content-Type: application/json' -d '{"url":"https://example.com/"}'
+```
+
+This is a **shared secret, not OAuth** — ported from Hill90's `WORK_TOKEN`
+pattern. OAuth/DCR is Phase 2's problem. The token is built to be reused rather
+than replaced: it is the credential an OAuth wrapper would sit in front of, it is
+the shape Anthropic's `static_headers` connector auth expects, and the terminal's
+WebSocket will check the same secret as a `?token=` param when it exists.
+
+The comparison is constant-time (`secrets.compare_digest`).
 
 ## Take-control viewer (`/ui`)
 
@@ -268,6 +314,11 @@ Chromium page survives real tool calls.
 - `tests/test_ssrf_redirects.py` — the redirect hops specifically, against a
   throwaway loopback redirect server. Deterministic and offline: no container
   and no network needed.
+- `tests/test_auth.py` — auth off by default, and with a second container
+  running `AGENTBOX_AUTH_TOKEN`: every `/api/*` route and MCP tool refused
+  without a token, refused with a wrong one, refused with a raw token lacking
+  the `Bearer ` prefix, accepted with the right one, and `/health` open
+  throughout.
 - `tests/test_feature_toggle.py` — the §10 trip-wires. Runs a second container
   with `AGENTBOX_ENABLE_JUMPBOX_TOOLS=false` and asserts the five tools are
   genuinely gone from `list_tools()`, that calling one is an unknown-tool error,
@@ -281,6 +332,7 @@ python:3.12-slim-bookworm
 ├── Playwright + Chromium browser (/data/browsers)
 ├── Python deps (fastmcp, pydantic, uvicorn, playwright)
 └── src/
+    ├── auth.py           (Bearer token check — SPEC §12)
     ├── mcp_server.py
     │   ├── persistent browser loop (daemon thread, owns the Page)
     │   ├── FastMCP streamable-http on :8000 → :8054

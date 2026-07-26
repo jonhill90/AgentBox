@@ -20,6 +20,10 @@ services:
       # registered with FastMCP at all. Any future non-local profile
       # must default this to false as its own reviewed decision.
       - AGENTBOX_ENABLE_JUMPBOX_TOOLS=${AGENTBOX_ENABLE_JUMPBOX_TOOLS:-true}
+      # Local auth (SPEC §12). Empty/unset = no auth, today's default.
+      # Set it and every MCP tool and /api/* route needs
+      # `Authorization: Bearer <token>`; /health stays open.
+      - AGENTBOX_AUTH_TOKEN=${AGENTBOX_AUTH_TOKEN:-}
 
     deploy:
       resources:

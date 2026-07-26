@@ -230,10 +230,49 @@ DebateWho's infrastructure.
   tool/UI still work, and only then treat "off for DebateWho" as a
   verified fact rather than an assumption.
 
+### 1.10 Local auth layer
+
+**User story:** As the operator, I want to figure out authentication
+against AgentBox itself, locally, before any OAuth/cloud discussion —
+so that by the time DebateWho integration is on the table, auth is a
+solved, tested problem being reused, not a new one being designed under
+pressure.
+
+**Why now, and why this shape:** Hill90 already has the answer for its
+own agentbox — a single shared secret (`WORK_TOKEN`), checked as a
+Bearer header on its `/work` endpoint and as a `?token=` query param on
+its WebSocket terminal. That's a real, working precedent, not a
+hypothetical — port the pattern rather than designing a new one. This
+is deliberately *not* the OAuth 2.1/DCR flow Phase 2 will eventually
+need for claude.ai custom connectors (see SPEC §13) — it's the simpler
+shared-secret layer that makes sense for a single local operator today,
+and it also happens to be exactly the shape Anthropic's `static_headers`
+connector auth (currently in beta) expects, so it isn't wasted work
+even once Phase 2 arrives: it becomes the credential an OAuth wrapper
+or a header-based connector sits in front of, not something thrown away.
+
+**Requirements:**
+
+- One env var (e.g. `AGENTBOX_AUTH_TOKEN`), optional. Empty/unset means
+  auth is off — today's behavior is unchanged by default.
+- When set, it gates: every MCP tool call, and every `/api/*` REST
+  route from the take-control UI. `/health` stays unauthenticated
+  (matches Hill90 — it's a Docker healthcheck target, not a capability).
+- Checked as `Authorization: Bearer <token>` on MCP/REST requests.
+  When the terminal exists (a later, separate build), its WebSocket
+  reuses this same token as a `?token=` query param, exactly like
+  Hill90's `ws_terminal_handler` — one secret, not a second mechanism.
+- The `/ui` page prompts for the token once (if the server reports
+  auth is enabled) and stores it for the session (e.g.
+  `sessionStorage`), attaching it to every `/api/*` call afterward.
+  Don't require re-entering it on every request.
+- Missing/wrong token: a clear 401 with a structured error, not a
+  silent failure or a raw exception.
+
 ### Out of Scope for Phase 1
 
-- Any auth/OAuth layer (beyond a bearer-token gate on the terminal
-  itself, ported from Hill90 — see the terminal's own future PRD entry).
+- OAuth/DCR (that's Phase 2, SPEC §13 — this section's bearer token is
+  a different, simpler mechanism, not a precursor implementation of it).
 - Any cloud or VPS deployment.
 - Any Tailscale networking or configuration.
 - Any DebateWho-specific configuration or code.

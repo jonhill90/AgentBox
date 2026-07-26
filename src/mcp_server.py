@@ -14,6 +14,7 @@ Hill90's AgentRuntime/tool-registry abstraction.
 
 import asyncio
 import base64
+import functools
 import json
 import logging
 import os
@@ -23,6 +24,8 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 from starlette.responses import HTMLResponse, JSONResponse
+
+import auth
 
 # Configure logging
 logging.basicConfig(
@@ -53,6 +56,62 @@ def _env_flag(name: str, default: str = "true") -> bool:
 
 
 JUMPBOX_TOOLS_ENABLED = _env_flag("AGENTBOX_ENABLE_JUMPBOX_TOOLS")
+
+
+# ── Auth wiring (SPEC §12) ───────────────────────────────────────────
+#
+# `auth` holds the check itself; this is where it gets attached. When
+# AGENTBOX_AUTH_TOKEN is unset these decorators are pass-throughs — the
+# guard is not wired in at all, so behaviour is identical to a build
+# without auth, which is what §12 requires of the default.
+#
+# Why registration-time decorators rather than FastMCP's own auth
+# middleware: that hook is built for OAuth (TokenVerifier, scopes,
+# issuer/resource metadata), which is explicitly Phase 2's problem, and
+# `streamable_http_app()` rebuilds the Starlette app on every call, so
+# there is no cached app to attach plain ASGI middleware to without
+# giving up `mcp.run(transport="streamable-http")` — the shape §3 says
+# to keep. §12's stated fallback is "a shared helper called at the top
+# of each tool"; wrapping at registration is that, minus sixteen chances
+# to forget it on a new tool.
+
+def _tool(*args, **kwargs):
+    """`@mcp.tool()`, plus the Bearer check when auth is enabled."""
+    def decorator(fn):
+        if auth.auth_enabled():
+            fn = _guard_tool(fn)
+        return mcp.tool(*args, **kwargs)(fn)
+    return decorator
+
+
+def _guard_tool(fn):
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        if not auth.mcp_request_authorized():
+            logger.warning(f"Unauthorized MCP tool call: {fn.__name__}")
+            return auth.UNAUTHORIZED_TOOL_RESULT
+        return await fn(*args, **kwargs)
+    return wrapper
+
+
+def _api_route(path: str, methods: list[str]):
+    """`@mcp.custom_route()` for /api/* routes, plus the Bearer check."""
+    def decorator(fn):
+        if auth.auth_enabled():
+            fn = _guard_route(fn)
+        return mcp.custom_route(path, methods=methods)(fn)
+    return decorator
+
+
+def _guard_route(fn):
+    @functools.wraps(fn)
+    async def wrapper(request):
+        if not auth.check_bearer(request.headers.get("authorization")):
+            logger.warning(f"Unauthorized REST call: {request.url.path}")
+            return JSONResponse(auth.UNAUTHORIZED_BODY, status_code=401)
+        return await fn(request)
+    return wrapper
+
 
 # Initialize FastMCP server
 mcp = FastMCP(
@@ -360,7 +419,18 @@ async def ui_page(request):
         return JSONResponse({"error": "UI page not found"}, status_code=500)
 
 
-@mcp.custom_route("/api/screenshot", methods=["GET"])
+@mcp.custom_route("/api/auth-required", methods=["GET"])
+async def api_auth_required(request):
+    """Does this server need a Bearer token? (SPEC §12)
+
+    Unauthenticated on purpose: the viewer has to be able to ask before
+    it can know to prompt, and the answer reveals nothing a 401 would
+    not already have told the caller.
+    """
+    return JSONResponse({"auth_required": auth.auth_enabled()})
+
+
+@_api_route("/api/screenshot", methods=["GET"])
 async def api_screenshot(request):
     """Current PNG of the live page, plus its URL.
 
@@ -389,7 +459,7 @@ async def api_screenshot(request):
     })
 
 
-@mcp.custom_route("/api/browser/navigate", methods=["POST"])
+@_api_route("/api/browser/navigate", methods=["POST"])
 async def api_navigate(request):
     body = await _json_body(request)
     url = body.get("url")
@@ -398,7 +468,7 @@ async def api_navigate(request):
     return _rest_result(await asyncio.to_thread(navigate_browser, url))
 
 
-@mcp.custom_route("/api/browser/click", methods=["POST"])
+@_api_route("/api/browser/click", methods=["POST"])
 async def api_click(request):
     body = await _json_body(request)
     try:
@@ -412,7 +482,7 @@ async def api_click(request):
     return _rest_result(await asyncio.to_thread(click_browser_at_percent, x_percent, y_percent))
 
 
-@mcp.custom_route("/api/browser/scroll", methods=["POST"])
+@_api_route("/api/browser/scroll", methods=["POST"])
 async def api_scroll(request):
     body = await _json_body(request)
     try:
@@ -426,7 +496,7 @@ async def api_scroll(request):
     return _rest_result(await asyncio.to_thread(scroll_browser, delta_x, delta_y))
 
 
-@mcp.custom_route("/api/browser/keypress", methods=["POST"])
+@_api_route("/api/browser/keypress", methods=["POST"])
 async def api_keypress(request):
     body = await _json_body(request)
     key = body.get("key")
@@ -435,7 +505,7 @@ async def api_keypress(request):
     return _rest_result(await asyncio.to_thread(press_key_in_browser, key))
 
 
-@mcp.custom_route("/api/browser/type", methods=["POST"])
+@_api_route("/api/browser/type", methods=["POST"])
 async def api_type(request):
     body = await _json_body(request)
     text = body.get("text")
@@ -444,7 +514,7 @@ async def api_type(request):
     return _rest_result(await asyncio.to_thread(type_in_browser, text))
 
 
-@mcp.custom_route("/api/browser/element", methods=["POST"])
+@_api_route("/api/browser/element", methods=["POST"])
 async def api_element(request):
     """Describe mode (SPEC §11): identify the element at a coordinate.
 
@@ -464,7 +534,7 @@ async def api_element(request):
     return _rest_result(await asyncio.to_thread(get_element_at_percent, x_percent, y_percent))
 
 
-@mcp.custom_route("/api/browser/history", methods=["POST"])
+@_api_route("/api/browser/history", methods=["POST"])
 async def api_history(request):
     body = await _json_body(request)
     action = body.get("action")
@@ -476,7 +546,7 @@ async def api_history(request):
 # ── MCP tool surface (SPEC §5 — nothing beyond this list) ────────────
 
 
-@mcp.tool()
+@_tool()
 async def navigate(url: str) -> str:
     """Navigate the persistent browser page to a URL.
 
@@ -490,7 +560,7 @@ async def navigate(url: str) -> str:
     return json.dumps(await asyncio.to_thread(navigate_browser, url))
 
 
-@mcp.tool()
+@_tool()
 async def screenshot(full_page: bool = True) -> str:
     """Screenshot the current page.
 
@@ -517,7 +587,7 @@ async def screenshot(full_page: bool = True) -> str:
     return await _browser_op(_screenshot, timeout=30.0)
 
 
-@mcp.tool()
+@_tool()
 async def click(selector: str) -> str:
     """Click an element by CSS selector.
 
@@ -538,7 +608,7 @@ async def click(selector: str) -> str:
     return await _browser_op(_click_selector, timeout=30.0)
 
 
-@mcp.tool()
+@_tool()
 async def get_text(selector: str = "body") -> str:
     """Read the visible text of an element (defaults to the whole body).
 
@@ -557,7 +627,7 @@ async def get_text(selector: str = "body") -> str:
     return await _browser_op(_get_text, timeout=20.0)
 
 
-@mcp.tool()
+@_tool()
 async def evaluate(script: str) -> str:
     """Evaluate JavaScript in the page and return its result.
 
@@ -580,7 +650,7 @@ async def evaluate(script: str) -> str:
     return await _browser_op(_evaluate, timeout=20.0)
 
 
-@mcp.tool()
+@_tool()
 async def click_at_percent(x_percent: float, y_percent: float) -> str:
     """Click at a viewport coordinate expressed as percentages.
 
@@ -594,7 +664,7 @@ async def click_at_percent(x_percent: float, y_percent: float) -> str:
     return json.dumps(await asyncio.to_thread(click_browser_at_percent, x_percent, y_percent))
 
 
-@mcp.tool()
+@_tool()
 async def type_at(text: str, x_percent: float | None = None, y_percent: float | None = None) -> str:
     """Type text, optionally clicking a percentage coordinate first to focus it.
 
@@ -613,7 +683,7 @@ async def type_at(text: str, x_percent: float | None = None, y_percent: float | 
     return json.dumps(await asyncio.to_thread(type_in_browser, text))
 
 
-@mcp.tool()
+@_tool()
 async def press_key(key: str) -> str:
     """Press a keyboard key (Enter, Tab, Escape, Backspace, ArrowDown, ...).
 
@@ -626,7 +696,7 @@ async def press_key(key: str) -> str:
     return json.dumps(await asyncio.to_thread(press_key_in_browser, key))
 
 
-@mcp.tool()
+@_tool()
 async def scroll(delta_x: float = 0, delta_y: float = 0) -> str:
     """Scroll the page by a pixel delta.
 
@@ -640,7 +710,7 @@ async def scroll(delta_x: float = 0, delta_y: float = 0) -> str:
     return json.dumps(await asyncio.to_thread(scroll_browser, delta_x, delta_y))
 
 
-@mcp.tool()
+@_tool()
 async def history(action: str) -> str:
     """Move through the page's session history.
 
@@ -653,7 +723,7 @@ async def history(action: str) -> str:
     return json.dumps(await asyncio.to_thread(browser_history, action))
 
 
-@mcp.tool()
+@_tool()
 async def health() -> str:
     """Health check for Docker monitoring."""
     return json.dumps({
@@ -681,7 +751,7 @@ if JUMPBOX_TOOLS_ENABLED:
         "read_file, write_file, list_directory, git, http_request"
     )
 
-    @mcp.tool()
+    @_tool()
     async def read_file(path: str) -> str:
         """Read a text file from the workspace.
 
@@ -693,7 +763,7 @@ if JUMPBOX_TOOLS_ENABLED:
         """
         return await jumpbox_tools.read_file(path)
 
-    @mcp.tool()
+    @_tool()
     async def write_file(path: str, content: str) -> str:
         """Write a text file inside the workspace, creating parent directories.
 
@@ -706,7 +776,7 @@ if JUMPBOX_TOOLS_ENABLED:
         """
         return await jumpbox_tools.write_file(path, content)
 
-    @mcp.tool()
+    @_tool()
     async def list_directory(path: str) -> str:
         """List the contents of a workspace directory.
 
@@ -718,7 +788,7 @@ if JUMPBOX_TOOLS_ENABLED:
         """
         return await jumpbox_tools.list_directory(path)
 
-    @mcp.tool()
+    @_tool()
     async def git(action: str, paths: str = ".", message: str = "", count: int = 10) -> str:
         """Run one of a fixed set of git subcommands in the workspace.
 
@@ -735,7 +805,7 @@ if JUMPBOX_TOOLS_ENABLED:
         """
         return await jumpbox_tools.execute_git(action, paths=paths, message=message, count=count)
 
-    @mcp.tool()
+    @_tool()
     async def http_request(
         url: str,
         method: str = "GET",
@@ -767,6 +837,7 @@ else:
 
 if __name__ == "__main__":
     logger.info("Starting AgentBox MCP server...")
+    auth.log_startup_state()
     logger.info("   Mode: Streamable HTTP")
     logger.info("   URL: http://0.0.0.0:8000/mcp")
 

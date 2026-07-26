@@ -44,7 +44,11 @@
   #describe { display: none; }
   #describe.shown { display: inline-block; }
   #describe.on { background: var(--link); border-color: var(--link); color: #04202e; }
+  /* [hidden] must beat display:inline-block — the UA stylesheet's
+     display:none loses to an author-level rule, which left an empty
+     image box next to the "Browser not active" placeholder. */
   #frame { position: relative; display: inline-block; }
+  #frame[hidden] { display: none; }
   #popover {
     position: absolute; z-index: 20; width: 300px; padding: 8px 10px;
     background: var(--panel); border: 1px solid var(--border); border-radius: 7px;
@@ -136,13 +140,57 @@ function setStatus(text, isError) {
   els.status.classList.toggle("err", !!isError);
 }
 
+// ── auth (SPEC §12) ─────────────────────────────────────────────────
+// If the server reports auth is on, ask for the token once and keep it
+// in sessionStorage — never per request. A 401 clears it and re-prompts,
+// so a wrong paste is recoverable without a reload.
+const TOKEN_KEY = "agentbox-token";
+let authRequired = false;
+
+function storedToken() {
+  return sessionStorage.getItem(TOKEN_KEY) || "";
+}
+
+function promptForToken(message) {
+  const entered = window.prompt(message || "AgentBox auth token:", "");
+  if (entered) sessionStorage.setItem(TOKEN_KEY, entered.trim());
+  else sessionStorage.removeItem(TOKEN_KEY);
+  return storedToken();
+}
+
+async function initAuth() {
+  try {
+    const res = await fetch("/api/auth-required", { cache: "no-store" });
+    authRequired = res.ok && (await res.json()).auth_required === true;
+  } catch {
+    authRequired = false;
+  }
+  if (authRequired && !storedToken()) {
+    promptForToken("This AgentBox requires an auth token (AGENTBOX_AUTH_TOKEN):");
+  }
+}
+
+function authHeaders(extra) {
+  const headers = Object.assign({}, extra || {});
+  const token = storedToken();
+  if (authRequired && token) headers["Authorization"] = "Bearer " + token;
+  return headers;
+}
+
+function handleUnauthorized() {
+  setStatus("Unauthorized — check the token", true);
+  sessionStorage.removeItem(TOKEN_KEY);
+  promptForToken("Token rejected. AgentBox auth token:");
+}
+
 async function post(path, body) {
   try {
     const res = await fetch(path, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(body),
     });
+    if (res.status === 401) { handleUnauthorized(); return null; }
     const data = await res.json().catch(() => ({}));
     if (data && data.success === false && data.error) setStatus(data.error, true);
     return data;
@@ -156,7 +204,8 @@ async function refresh() {
   if (inFlight) return;
   inFlight = true;
   try {
-    const res = await fetch("/api/screenshot", { cache: "no-store" });
+    const res = await fetch("/api/screenshot", { cache: "no-store", headers: authHeaders() });
+    if (res.status === 401) { handleUnauthorized(); return; }
     if (res.status === 404) {
       els.frame.hidden = true;
       els.placeholder.hidden = false;
@@ -342,8 +391,10 @@ els.stage.addEventListener("keydown", async (e) => {
 
 // ── poll ────────────────────────────────────────────────────────────
 setTakeControl(false);
-refresh();
-setInterval(refresh, POLL_MS);
+initAuth().then(() => {
+  refresh();
+  setInterval(refresh, POLL_MS);
+});
 </script>
 </body>
 </html>

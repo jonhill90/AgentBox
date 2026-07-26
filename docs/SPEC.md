@@ -152,7 +152,7 @@ host) is a small config change later, not a redesign.
   there's nothing to restrict until `NETWORK_ALLOWLIST` has an entry
   and there's an actual deployment target (Phase 2) with a real network
   boundary to enforce it against. Document in `src/policy.py` that this
-  is deferred, and why (§13 item 3 already tracks the real version of
+  is deferred, and why (§14 item 3 already tracks the real version of
   this for Phase 2).
 - One test: `COMMAND_ALLOWLIST == []` and `NETWORK_ALLOWLIST == []` (or
   whatever documented baseline) as of this commit — a trivial assertion,
@@ -253,10 +253,53 @@ explicitly wanted:
   §10 toggle; it's part of the core browser/UI feature set from §6,
   same trust tier as `screenshot` or `click`.
 
-## 12. Non-Functional Requirements
+## 12. Local auth layer (PRD 1.10)
+
+Port Hill90's `WORK_TOKEN` pattern (read-only reference:
+`services/agentbox/app/runtime.py`'s `_check_auth`, `server.py`'s
+`os.environ.get("WORK_TOKEN")` and its use in both the `/work` endpoint
+and `ws_terminal_handler`).
+
+- `AGENTBOX_AUTH_TOKEN` env var, optional, empty/unset by default —
+  auth is off, matching every prior test in this suite; do not change
+  their behavior.
+- A single check function (in `src/policy.py`, alongside the other
+  policy primitives, or a new small `src/auth.py` — your call, keep it
+  in one obvious place) mirroring `_check_auth`: reads the
+  `authorization` header, requires the `Bearer ` prefix, compares to
+  `AGENTBOX_AUTH_TOKEN`. Returns `False` (deny) if the token isn't
+  configured at all — but only *enforce* that denial where the caller
+  actually wired the check in; if `AGENTBOX_AUTH_TOKEN` is unset, don't
+  wire the check in at all, so behavior is identical to today.
+- Wire the check into: every `@mcp.tool()` (FastMCP middleware/dependency
+  if it supports one cleanly, otherwise a shared helper called at the
+  top of each tool) and every `/api/*` custom route from §6. `/health`
+  is exempt, same as Hill90.
+- 401 with a structured `{"success": false, "error": "..."}` body (MCP
+  tool calls) or an equivalent JSON 401 (REST routes) on a missing or
+  wrong token — never a bare exception.
+- `/ui`: if a small unauthenticated `GET /api/auth-required` (or similar)
+  reports auth is on, prompt once for the token, store it in
+  `sessionStorage`, attach `Authorization: Bearer <token>` to every
+  subsequent `/api/*` fetch call. Don't prompt per-request.
+- Tests: with `AGENTBOX_AUTH_TOKEN` unset (today's default), the full
+  existing suite must pass unchanged. With it set (a second container
+  run, same pattern as §10's toggle tests), assert unauthenticated
+  calls to a gated MCP tool and a gated REST route both fail with 401,
+  and that the correct Bearer token succeeds. Also assert `/health`
+  still works with no token, auth on or off.
+- This token is designed to be reusable, not a throwaway: it's the
+  same shape the eventual terminal's WebSocket gate needs (§14 item 6),
+  and it's also exactly what Anthropic's `static_headers` connector
+  auth (currently beta) expects a self-hosted MCP server to check —
+  building it now means Phase 2 has a real credential to plug in
+  rather than a design question to answer from scratch.
+
+## 13. Non-Functional Requirements
 
 - Must run entirely locally via `docker-compose up` — no cloud
-  dependency, no Tailscale, no auth layer. It is fine (expected) that
+  dependency, no Tailscale, no auth layer beyond §12's opt-in token.
+  It is fine (expected) that
   this container is reachable only on the operator's local Docker
   network in this phase.
 - Tests: at minimum, one integration test that starts the container,
@@ -272,10 +315,12 @@ explicitly wanted:
 - Update `README.md` to describe the new tool set and drop the
   `execute_command`/`manage_process` documentation.
 
-## 13. Open Items (Phase 2 — do not design or build yet)
+## 14. Open Items (Phase 2 — do not design or build yet)
 
 1. OAuth wrapper approach (Cloudflare Worker `workers-oauth-provider`
-   template vs. hand-rolled DCR/CIMD).
+   template vs. hand-rolled DCR/CIMD) — §12's bearer token becomes the
+   credential this fronts, per the connector-auth research: it's
+   already the shape Anthropic's `static_headers` beta expects.
 2. Deployment target: DebateWho's VPS/Traefik, new subdomain,
    `policy.hujson`/DNS entries — none of this exists yet and shouldn't
    be scaffolded speculatively in Phase 1.
@@ -287,14 +332,17 @@ explicitly wanted:
 4. The terminal (Hill90's `ws_terminal.py`/`pty_shell.py`/
    `XTerminal.tsx` — a real interactive PTY, not a policy-checked
    command tool). Its own dedicated build, its own PRD/SPEC entry when
-   that starts, gated by §10's toggle framework from the moment it
-   exists, and — same as §8/§9 — genuinely absent from the MCP/route
-   surface when the toggle is off, not merely unlinked from the UI.
+   that starts. Decision made: its own separate toggle
+   (`AGENTBOX_ENABLE_TERMINAL`), not shared with §10's
+   `AGENTBOX_ENABLE_JUMPBOX_TOOLS` — a PTY is a categorically different
+   risk than a path-scoped file read, and a shared flag would make
+   "filesystem on, PTY off" inexpressible, which is likely the exact
+   posture wanted for a non-local profile. Genuinely absent from the
+   MCP/route surface when its toggle is off, same discipline as §8/§9.
 5. Whether §8/§9's tools, and the eventual terminal, actually get
    flipped off and verified off (PRD 1.9's last requirement) before
    Phase 2 planning starts — this needs to actually happen once, not
    just be assumed because a toggle exists.
-6. For the terminal specifically, when it's built: carry over Hill90's
-   own precedent of gating even local/dev access with a bearer token
-   on the WebSocket (`?token=<WORK_TOKEN>`) — Hill90 doesn't expose it
-   unauthenticated even to itself, and AgentBox shouldn't either.
+6. The terminal's WebSocket reuses §12's `AGENTBOX_AUTH_TOKEN` as its
+   `?token=` query param, exactly like Hill90's `ws_terminal_handler`
+   reuses `WORK_TOKEN` — one secret, not a second bespoke one.
