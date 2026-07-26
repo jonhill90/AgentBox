@@ -8,15 +8,6 @@
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/xterm-addon-fit.js"></script>
 <style>
-  /* Powerline/icon glyphs for the tmux Tokyo Night status bar. A 944-byte
-     subset of the Nerd Font symbols — see src/vendor/README.md. Listed
-     FIRST in the terminal's font stack so it wins for those codepoints
-     and the normal mono font handles everything else. */
-  @font-face {
-    font-family: "NerdSymbols";
-    src: url("/vendor/nerd-symbols.woff2") format("woff2");
-    font-display: block;
-  }
   :root {
     --bg: #0b1120; --panel: #111a2e; --border: #1e2b45; --text: #e6edf7;
     --muted: #8296b3; --accent: #d97706; --accent-dim: #78350f; --link: #38bdf8;
@@ -564,7 +555,14 @@ function connectTerm() {
   if (!term.xterm) {
     term.xterm = new Terminal({
       cursorBlink: true, disableStdin: true, fontSize: 13, scrollback: 5000,
-      convertEol: true, fontFamily: "NerdSymbols, ui-monospace, SFMono-Regular, Menlo, monospace",
+      convertEol: true,
+      // Exactly hill90-app's XTerminal.tsx stack. FiraCode Nerd Font
+      // carries the full powerline/icon set the tmux Tokyo Night status
+      // bar draws, and it is installed both on the operator's machine and
+      // in this image. An earlier version shipped a tiny subsetted font
+      // FIRST in this list, which claimed the separator codepoints and
+      // rendered them blank — the fallback never got a chance.
+      fontFamily: "'FiraCode Nerd Font', 'Fira Code', 'JetBrains Mono', monospace",
       theme: { background: "#1a1b26", foreground: "#a9b1d6", cursor: "#c0caf5" },
     });
     term.fit = new FitAddon.FitAddon();

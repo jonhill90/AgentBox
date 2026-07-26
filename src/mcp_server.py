@@ -513,8 +513,7 @@ def _rest_result(result: dict) -> JSONResponse:
 
 
 VENDOR_DIR = Path(__file__).resolve().parent / "vendor"
-VENDOR_TYPES = {".js": "text/javascript", ".css": "text/css",
-                ".woff2": "font/woff2"}
+VENDOR_TYPES = {".js": "text/javascript", ".css": "text/css"}
 
 
 @mcp.custom_route("/vendor/{name}", methods=["GET"])

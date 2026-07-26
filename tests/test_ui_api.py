@@ -327,8 +327,7 @@ async def test_ui_page_wires_up_the_terminal_view():
     status, html = await rest_get("/ui")
     assert status == 200
     for marker in ['id="termview"', 'id="tab-terminal"', "/vendor/xterm.js",
-                   "/vendor/xterm.css", "/vendor/nerd-symbols.woff2",
-                   "new Terminal(", "FitAddon.FitAddon", '"resize"', "termWsUrl"]:
+                   "/vendor/xterm.css",                    "new Terminal(", "FitAddon.FitAddon", '"resize"', "termWsUrl"]:
         assert marker in html, f"UI page is missing {marker}"
     # The terminal tab only appears when the server reports it on.
     assert "tabEls.terminal.hidden = !termEnabled" in html
@@ -344,23 +343,15 @@ async def test_ui_uses_tabs_rather_than_a_split_pane():
     assert 'id="termpanel"' not in html, "old split-panel markup left behind"
 
 
-async def test_terminal_font_subset_is_served():
-    """The tmux Tokyo Night status bar needs Nerd Font glyphs or it shows tofu.
+async def test_terminal_uses_the_nerd_font_by_name():
+    """Fonts are not vendored — FiraCode Nerd Font is installed in the
+    image and on the operator's machine, exactly as hill90-app does it.
+    A vendored subset previously shadowed the real font and rendered the
+    powerline separators blank."""
+    status, html = await rest_get("/ui")
+    assert status == 200
+    assert "'FiraCode Nerd Font'" in html, "UI does not ask for the Nerd Font"
+    assert "nerd-symbols" not in html, "the broken vendored subset is back"
 
-    Fetched as bytes, not through rest_get: woff2 is binary and does not
-    survive a text decode.
-    """
-    import asyncio
-    import urllib.request
-
-    from conftest import BASE_URL
-
-    def _fetch():
-        with urllib.request.urlopen(f"{BASE_URL}/vendor/nerd-symbols.woff2", timeout=30) as r:
-            return r.status, r.read(), r.headers.get("Content-Type", "")
-
-    status, body, ctype = await asyncio.to_thread(_fetch)
-    assert status == 200, status
-    assert ctype == "font/woff2", ctype
-    assert body[:4] == b"wOF2", "not a woff2 file"
-    assert 500 < len(body) < 50_000, f"unexpected font size: {len(body)}"
+    status, _ = await rest_get("/vendor/nerd-symbols.woff2")
+    assert status == 404, "a vendored font is being served again"

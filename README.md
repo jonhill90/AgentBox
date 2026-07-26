@@ -283,12 +283,15 @@ session. The tab is only shown when the server reports the toggle on.
 The terminal is Observing by default; **Take Control** enables stdin, matching
 the browser view's model.
 
-**Theme:** tmux runs `fabioluciano/tmux-tokyo-night` pinned to `fcfde9a` — the
-same commit and the same mods (night variation, transparent status bar, status
-at top, empty separators) as hill90-app's agentbox, so it looks like the
-terminal there. The powerline glyphs need a Nerd Font; rather than vendoring
-2.1 MB, `src/vendor/nerd-symbols.woff2` is a **944-byte subset** of just the six
-codepoints the theme actually draws. An auth refusal arrives as an HTTP 403 handshake rejection
+**Theme:** `theme/tmux.conf` is taken from the operator's dotfiles
+(`~/.dotfiles/tmux/.tmux.conf`), which is also what hill90-app's agentbox ships
+— `fabioluciano/tmux-tokyo-night` pinned to `fcfde9a`, night variation,
+transparent status bar, status at top, and the **round** powerline separators
+(`U+E0B4`/`U+E0B6`). Keybindings that do not depend on plugins absent from this
+image are carried over too. Rendering those glyphs needs **FiraCode Nerd Font**,
+which is installed in the image and named directly in the xterm.js font stack,
+exactly as hill90-app does it. Fonts are deliberately not vendored — see
+`src/vendor/README.md` for why the earlier subset was a mistake. An auth refusal arrives as an HTTP 403 handshake rejection
 rather than close code 4001 — the server rejects *before* accepting, so no
 socket is ever opened — and the client treats that as "do not retry".
 

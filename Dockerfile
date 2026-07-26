@@ -56,6 +56,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Everything the server touches at runtime is owned by this user.
 RUN useradd --create-home --shell /bin/zsh --uid 1000 agentbox
 
+# FiraCode Nerd Font, for terminal rendering in xterm.js — same font and
+# same source as hill90-app's agentbox. The tmux Tokyo Night status bar
+# draws powerline separators and icons from the Nerd Font private-use
+# area; without this they render as tofu.
+# curl and xz-utils are needed for the download itself and are not in the
+# slim base. No `|| true` on the end: an earlier version had one, the
+# download failed silently because curl was missing, and the image
+# shipped with an empty font directory that nothing complained about.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        fontconfig curl xz-utils && \
+    rm -rf /var/lib/apt/lists/* && \
+    mkdir -p /usr/share/fonts/nerd-fonts && \
+    curl -fsSL -o /tmp/firacode.tar.xz https://github.com/ryanoasis/nerd-fonts/releases/download/v3.3.0/FiraCode.tar.xz && \
+    tar -xf /tmp/firacode.tar.xz -C /usr/share/fonts/nerd-fonts && \
+    rm /tmp/firacode.tar.xz && \
+    fc-cache -f && \
+    fc-list | grep -qi firacode
+
 # tmux Tokyo Night theme (SPEC §15.5), matching hill90-app's agentbox and
 # Jon's dotfiles. The plugin is pinned to the same commit as both, so the
 # status bar here looks like the status bar there rather than drifting
