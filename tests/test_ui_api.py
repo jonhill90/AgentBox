@@ -224,3 +224,69 @@ async def test_screenshot_404s_before_the_browser_exists():
     status, shot = await rest_get("/api/screenshot")
     assert status == 200, shot
     assert base64.b64decode(shot["screenshot"]).startswith(PNG_MAGIC)
+
+
+# ── Describe element-picker mode (SPEC §11) ──────────────────────────
+
+DESCRIBE_PAGE = (
+    "data:text/html,<div id=target class='a b c' "
+    "style='position:absolute;left:0;top:0;width:1280px;height:720px'>hello describe</div>"
+)
+
+
+async def test_element_route_describes_what_is_under_the_point():
+    await rest_post("/api/browser/navigate", {"url": DESCRIBE_PAGE})
+
+    status, body = await rest_post("/api/browser/element", {"x_percent": 50, "y_percent": 50})
+    assert status == 200 and body["success"], body
+
+    el = body["element"]
+    assert el["tag"] == "div", el
+    assert el["id"] == "target", el
+    assert el["classes"] == ["a", "b", "c"], el
+    assert "hello describe" in el["text"], el
+    assert el["selector"] == "#target", el
+    assert el["box"]["w"] > 0 and el["box"]["h"] > 0, el
+    assert el["outerHTML"].startswith("<div"), el
+
+
+async def test_element_route_does_not_click_the_page():
+    """Describe inspects; it must not fire a real click."""
+    page = ("data:text/html,<button id=b onclick=\"window.__clicked=1\" "
+            "style='position:absolute;left:0;top:0;width:1280px;height:720px'>b</button>")
+    await rest_post("/api/browser/navigate", {"url": page})
+
+    await rest_post("/api/browser/element", {"x_percent": 50, "y_percent": 50})
+
+    async with mcp_session() as session:
+        probe = await call(session, "evaluate", {"script": "() => window.__clicked || 0"})
+        assert probe["result"] == "0", f"Describe fired a real click: {probe}"
+
+    # ...whereas the click route does.
+    await rest_post("/api/browser/click", {"x_percent": 50, "y_percent": 50})
+    async with mcp_session() as session:
+        probe = await call(session, "evaluate", {"script": "() => window.__clicked || 0"})
+        assert probe["result"] == "1", probe
+
+
+async def test_element_route_reports_empty_space_without_failing():
+    await rest_post("/api/browser/navigate", {"url": "data:text/html,<p>tiny</p>"})
+    status, body = await rest_post("/api/browser/element", {"x_percent": 99, "y_percent": 99})
+    assert status == 200 and body["success"], body
+    assert body["element"] is None or isinstance(body["element"], dict), body
+
+
+async def test_element_route_requires_coordinates():
+    status, body = await rest_post("/api/browser/element", {})
+    assert status == 400, body
+    assert body["success"] is False and "x_percent" in body["error"], body
+
+
+async def test_ui_page_wires_up_describe_mode():
+    status, html = await rest_get("/ui")
+    assert status == 200
+    assert "/api/browser/element" in html, "UI never calls the element route"
+    assert 'id="describe"' in html, "no Describe toggle in the UI"
+    # Describe is only offered while Take Control is on (Hill90's behaviour).
+    assert 'els.describe.classList.toggle("shown", on)' in html
+    assert "if (!on) setDescribe(false)" in html

@@ -41,6 +41,27 @@
     display: block; background: #000;
   }
   #shot.armed { cursor: crosshair; }
+  #describe { display: none; }
+  #describe.shown { display: inline-block; }
+  #describe.on { background: var(--link); border-color: var(--link); color: #04202e; }
+  #frame { position: relative; display: inline-block; }
+  #popover {
+    position: absolute; z-index: 20; width: 300px; padding: 8px 10px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 7px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.5); font-size: 12px;
+  }
+  #popover .tag { color: var(--link); font-family: ui-monospace, SFMono-Regular, monospace; }
+  #popover .muted { color: var(--muted); }
+  #popover .row { margin-top: 5px; word-break: break-all; }
+  #popover .txt { font-style: italic; }
+  #popover .close {
+    float: right; cursor: pointer; color: var(--muted); border: none;
+    background: none; padding: 0 0 0 8px; font-size: 14px; line-height: 1;
+  }
+  #highlight {
+    position: absolute; pointer-events: none; border: 2px solid var(--link);
+    background: rgba(56, 189, 248, .12); border-radius: 3px;
+  }
   #placeholder { margin: auto; text-align: center; color: var(--muted); max-width: 380px; }
   #placeholder h2 { font-size: 15px; color: var(--text); margin: 0 0 6px; font-weight: 600; }
   #placeholder p { margin: 4px 0; }
@@ -60,11 +81,14 @@
   <button class="nav" id="forward" title="Forward">&#8594;</button>
   <button class="nav" id="reload" title="Reload">&#8635;</button>
   <input id="url" type="text" placeholder="Enter URL and press Enter..." spellcheck="false" autocomplete="off">
+  <button id="describe" title="When on, clicking an element describes it instead of clicking the page">Describe</button>
   <button id="control" title="When on, clicks / scrolls / keystrokes go to the real page">Take Control</button>
 </header>
 
 <div id="stage" tabindex="-1">
-  <img id="shot" alt="Live browser screenshot" hidden>
+  <div id="frame" hidden>
+    <img id="shot" alt="Live browser screenshot">
+  </div>
   <div id="placeholder">
     <h2>Browser not active</h2>
     <p>The page starts on the first tool call or navigation.</p>
@@ -86,18 +110,23 @@
 const POLL_MS = 2000;
 const SCROLL_DEBOUNCE_MS = 100;
 
+const VIEWPORT_W = 1280, VIEWPORT_H = 720;   // matches the context in mcp_server.py
+
 const els = {
   shot: document.getElementById("shot"),
+  frame: document.getElementById("frame"),
   placeholder: document.getElementById("placeholder"),
   stage: document.getElementById("stage"),
   url: document.getElementById("url"),
   control: document.getElementById("control"),
+  describe: document.getElementById("describe"),
   status: document.getElementById("status"),
   current: document.getElementById("current"),
   hint: document.getElementById("hint"),
 };
 
 let takeControl = false;
+let describeMode = false;
 let inFlight = false;              // don't stack polls if one is slow
 const scrollAcc = { x: 0, y: 0 };
 let scrollTimer = null;
@@ -129,7 +158,7 @@ async function refresh() {
   try {
     const res = await fetch("/api/screenshot", { cache: "no-store" });
     if (res.status === 404) {
-      els.shot.hidden = true;
+      els.frame.hidden = true;
       els.placeholder.hidden = false;
       setStatus("Browser not active");
       els.current.textContent = "";
@@ -141,7 +170,7 @@ async function refresh() {
     if (!data.screenshot) { setStatus(data.error || "No screenshot available", true); return; }
 
     els.shot.src = "data:image/png;base64," + data.screenshot;
-    els.shot.hidden = false;
+    els.frame.hidden = false;
     els.placeholder.hidden = true;
     els.current.textContent = data.url || "";
     // Don't fight the operator while they're editing the URL bar.
@@ -175,6 +204,14 @@ document.getElementById("forward").addEventListener("click", () => history("forw
 document.getElementById("reload").addEventListener("click", () => history("reload"));
 
 // ── take control ────────────────────────────────────────────────────
+function updateHint() {
+  els.hint.textContent = !takeControl
+    ? "Take Control off — view only"
+    : describeMode
+      ? "Describe on — clicking inspects an element instead of clicking it"
+      : "Click, scroll, and type go to the page";
+}
+
 function setTakeControl(on) {
   takeControl = on;
   els.control.classList.toggle("on", on);
@@ -182,18 +219,83 @@ function setTakeControl(on) {
   els.shot.classList.toggle("armed", on);
   els.stage.classList.toggle("armed", on);
   els.stage.tabIndex = on ? 0 : -1;
-  els.hint.textContent = on
-    ? "Click, scroll, and type go to the page"
-    : "Take Control off — view only";
+  // Describe only exists while you have control (matches Hill90's UI).
+  els.describe.classList.toggle("shown", on);
+  if (!on) setDescribe(false);
+  updateHint();
   if (on) els.stage.focus();
 }
+
+function setDescribe(on) {
+  describeMode = on;
+  els.describe.classList.toggle("on", on);
+  els.describe.textContent = on ? "Describe: ON" : "Describe";
+  if (!on) clearPopover();
+  updateHint();
+}
+
 els.control.addEventListener("click", () => setTakeControl(!takeControl));
+els.describe.addEventListener("click", () => setDescribe(!describeMode));
+
+// ── describe popover ────────────────────────────────────────────────
+function clearPopover() {
+  const old = document.getElementById("popover");
+  if (old) old.remove();
+  const hl = document.getElementById("highlight");
+  if (hl) hl.remove();
+}
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+
+function showPopover(el, atX, atY) {
+  clearPopover();
+  if (!el) { setStatus("No element at that point", true); return; }
+
+  if (el.box && el.box.w > 0) {
+    const hl = document.createElement("div");
+    hl.id = "highlight";
+    hl.style.left = (el.box.x / VIEWPORT_W) * 100 + "%";
+    hl.style.top = (el.box.y / VIEWPORT_H) * 100 + "%";
+    hl.style.width = (el.box.w / VIEWPORT_W) * 100 + "%";
+    hl.style.height = (el.box.h / VIEWPORT_H) * 100 + "%";
+    els.frame.appendChild(hl);
+  }
+
+  const classes = (el.classes || []).length ? "." + el.classes.slice(0, 3).join(".") : "";
+  const pop = document.createElement("div");
+  pop.id = "popover";
+  pop.innerHTML =
+    '<button class="close" title="Close">&times;</button>' +
+    '<span class="tag">&lt;' + esc(el.tag) + "&gt;</span>" +
+    (el.id ? ' <span class="muted">#' + esc(el.id) + "</span>" : "") +
+    (classes ? ' <span class="muted">' + esc(classes) + "</span>" : "") +
+    (el.text ? '<div class="row txt">"' + esc(el.text.slice(0, 120)) + '"</div>' : "") +
+    '<div class="row muted">selector: <code>' + esc(el.selector || "") + "</code></div>";
+  pop.style.left = Math.min(atX, els.shot.clientWidth - 310) + "px";
+  pop.style.top = (atY > els.shot.clientHeight / 2 ? atY - 130 : atY + 18) + "px";
+  pop.querySelector(".close").addEventListener("click", clearPopover);
+  els.frame.appendChild(pop);
+  setStatus("Described <" + el.tag + ">");
+}
 
 els.shot.addEventListener("click", async (e) => {
   if (!takeControl) return;
   const rect = els.shot.getBoundingClientRect();
   const xPct = Math.round(((e.clientX - rect.left) / rect.width) * 10000) / 100;
   const yPct = Math.round(((e.clientY - rect.top) / rect.height) * 10000) / 100;
+
+  if (describeMode) {
+    // Inspect the element instead of clicking it — the page is untouched.
+    const data = await post("/api/browser/element", { x_percent: xPct, y_percent: yPct });
+    if (data && data.success) showPopover(data.element, e.clientX - rect.left, e.clientY - rect.top);
+    return;
+  }
+
+  clearPopover();
   els.stage.focus();  // so keystrokes land here next
   await post("/api/browser/click", { x_percent: xPct, y_percent: yPct });
   await refresh();
@@ -222,7 +324,7 @@ const SPECIAL_KEYS = new Set([
 ]);
 
 els.stage.addEventListener("keydown", async (e) => {
-  if (!takeControl) return;
+  if (!takeControl || describeMode) return;   // Describe never types into the page
   // Never steal keystrokes aimed at the URL bar.
   const tag = document.activeElement && document.activeElement.tagName;
   if (tag === "INPUT" || tag === "TEXTAREA") return;

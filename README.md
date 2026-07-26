@@ -4,10 +4,14 @@ An MCP server that gives an agent a real, **persistent** Chromium browser it can
 drive over Streamable HTTP — navigate, screenshot, click, read text, run JS, and
 click/type/scroll by coordinate, all against the same live page across separate
 tool calls. It also ships a **take-control viewer** at `/ui` so you can watch
-that page live and grab the wheel yourself.
+that page live and grab the wheel yourself, and — behind a feature toggle —
+workspace-scoped filesystem, git, and SSRF-protected HTTP tools.
 
 **Status: Phase 1** — local Docker only, on the operator's machine. No auth, no
 cloud deployment, no Tailscale. See `docs/PRD.md` and `docs/SPEC.md`.
+
+AKM/knowledge tools are permanently out of scope. A real interactive terminal is
+a separate, deliberate build that does not exist yet.
 
 ## How the persistence works
 
@@ -51,6 +55,7 @@ Configuration lives in `.env` and is read by `docker-compose.yml`:
 |---|---|---|
 | `AGENTBOX_PORT` | `8054` | Host port mapped to the container's `8000` |
 | `LOG_LEVEL` | `info` | Server log level |
+| `AGENTBOX_ENABLE_JUMPBOX_TOOLS` | `true` | Register the filesystem/git/http tools (see below) |
 
 The compose file defines one service, no external network, and one named volume
 (`agentbox-screenshots` → `/workspace/screenshots`). Resource limits are 1 CPU,
@@ -58,7 +63,9 @@ The compose file defines one service, no external network, and one named volume
 
 ## MCP Tools
 
-Exactly the eleven tools in `SPEC.md` §5 — no more:
+### Core browser tools (always registered)
+
+The eleven tools from `SPEC.md` §5. These ship unconditionally:
 
 | Tool | Arguments | Returns |
 |---|---|---|
@@ -83,6 +90,53 @@ leaves the browser alive and usable. `screenshot` also writes a PNG to
 `type_at` given `x_percent`/`y_percent` clicks that point to focus it first;
 without them it types into whatever is already focused.
 
+### Jumpbox tools (behind `AGENTBOX_ENABLE_JUMPBOX_TOOLS`)
+
+These five are registered **only when the toggle is on** — see the next section.
+
+| Tool | Arguments | Notes |
+|---|---|---|
+| `read_file` | `path` | First 1 MB; must be inside `/workspace` |
+| `write_file` | `path`, `content` | Creates parent directories; `/workspace` only |
+| `list_directory` | `path` | `name`, `type`, `size` per entry |
+| `git` | `action`, `paths`, `message`, `count` | Fixed set: `init`, `status`, `add`, `commit`, `diff`, `log`, `reset` |
+| `http_request` | `url`, `method`, `headers`, `body` | GET/POST only; SSRF-blocked |
+
+Containment, which is the interesting part:
+
+- **`PathPolicy` scopes the filesystem tools to `/workspace`.** Paths are
+  `realpath`-resolved before checking, so `..` traversal and symlinks are judged
+  on their target, and `/workspaceless` is not treated as a child of
+  `/workspace`. Default-deny: a path must match an allowed root.
+- **`git` is a fixed subcommand set, not a passthrough.** There is no
+  `git <arbitrary args>`; unknown actions are refused. Adding a subcommand is a
+  reviewed code change.
+- **`http_request` resolves the hostname and checks the resolved IP** against
+  loopback, RFC1918, link-local (including cloud metadata at 169.254.169.254),
+  and the 100.64.0.0/10 CGNAT range Tailscale uses — so a DNS name pointing at
+  an internal address does not get through. GET and POST only.
+
+## Feature toggle
+
+`AGENTBOX_ENABLE_JUMPBOX_TOOLS` is read **once at startup** and defaults to
+`true` for local dev. `docker-compose.yml` and `.env.example` set it explicitly,
+so the "on for local dev" fact lives in deployment config rather than in code.
+
+When it is off, the five tools above are **not registered with FastMCP at all** —
+they are absent from `list_tools()` and calling one is an unknown-tool error, not
+a "disabled" response. They are defined inside the conditional, so nothing exists
+to reach. The core browser tools and `/ui` are unaffected.
+
+```bash
+AGENTBOX_ENABLE_JUMPBOX_TOOLS=false docker compose up -d
+docker compose logs | grep Jumpbox     # "Jumpbox tools DISABLED"
+```
+
+`tests/test_feature_toggle.py` proves both directions by running a second
+container with the flag flipped and comparing the real `list_tools()` surface.
+Any deployment profile other than local dev must default this to off, as its own
+reviewed decision (PRD 1.9).
+
 ## Take-control viewer (`/ui`)
 
 Open <http://localhost:8054/ui>. It is one static HTML page with inline JS — no
@@ -98,15 +152,16 @@ build step, no framework, no extra dependencies — modelled on Hill90's
   to `/api/browser/type`, and Enter/Tab/Escape/Backspace/Delete/arrows/Home/End/
   PageUp/PageDown go to `/api/browser/keypress`. While it is off, the page is a
   read-only live view and no input is captured.
+- **Describe** toggle, next to Take Control and only offered while it is on.
+  With Describe on, clicking the image inspects the element under the pointer
+  instead of clicking it: a popover shows the tag, id, classes, text and a
+  suggested CSS selector, with the element outlined on the screenshot. The page
+  itself is never touched, and keystrokes are not forwarded while it is on.
 - Before anything has navigated, the viewer shows "Browser not active" — merely
   opening it never launches Chromium.
 
 Crucially this is the *same* page the MCP tools drive, not a second session: an
 agent can navigate over MCP and you can click the result in the viewer.
-
-"Describe" element-picker mode from Hill90's UI is deliberately **not** built —
-SPEC §6 makes it optional, and it would need an element-inspection REST route
-that is not in the spec's route list.
 
 ### REST surface behind the viewer
 
@@ -124,6 +179,7 @@ MCP tool calls — there is no second copy of the browser logic.
 | `POST /api/browser/keypress` | `{key}` | |
 | `POST /api/browser/type` | `{text}` | |
 | `POST /api/browser/history` | `{action}` | `back` \| `forward` \| `reload` |
+| `POST /api/browser/element` | `{x_percent, y_percent}` | Describe mode: element info, no click |
 
 Browser-level failures return HTTP 200 with `{"success": false, "error": ...}`,
 matching the MCP surface; only malformed requests get a 400. **There is no auth
@@ -195,8 +251,17 @@ Chromium page survives real tool calls.
   click/type/keypress/scroll actually move the real page, REST and MCP are
   proven to drive the *same* page, and `/api/screenshot` 404s — without
   launching Chromium — until something has navigated.
-- `tests/test_policy.py` — the allowlist trip-wire: both lists still empty, and
-  the server still does not reference them. Needs no container.
+- `tests/test_policy.py` — the allowlist trip-wire (both lists still empty and
+  unreferenced in code) plus `PathPolicy` unit tests: traversal, symlink
+  resolution, prefix-is-not-a-child, denied-beats-allowed, read-only. Needs no
+  container.
+- `tests/test_jumpbox_tools.py` — the gated tools' real behaviour: filesystem
+  round-trips, every escape attempt out of `/workspace` refused, git's fixed
+  subcommand set, and the SSRF guard against loopback/RFC1918/link-local/CGNAT.
+- `tests/test_feature_toggle.py` — the §10 trip-wires. Runs a second container
+  with `AGENTBOX_ENABLE_JUMPBOX_TOOLS=false` and asserts the five tools are
+  genuinely gone from `list_tools()`, that calling one is an unknown-tool error,
+  and that the browser, `/ui` and `/health` still work with everything off.
 
 ## Architecture
 
@@ -210,8 +275,9 @@ python:3.12-slim-bookworm
     │   ├── persistent browser loop (daemon thread, owns the Page)
     │   ├── FastMCP streamable-http on :8000 → :8054
     │   └── plain REST routes for the viewer (same internal functions)
-    ├── policy.py  (empty allowlist scaffolding — unused by design)
-    └── ui.html    (served at /ui, inline JS, no build step)
+    ├── policy.py         (allowlist scaffolding + PathPolicy)
+    ├── jumpbox_tools.py  (filesystem, git, http_request — toggle-gated)
+    └── ui.html           (served at /ui, inline JS, no build step)
 ```
 
 Debian is required: Playwright/Chromium does not run on musl libc, so an Alpine

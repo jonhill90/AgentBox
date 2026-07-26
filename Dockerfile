@@ -34,6 +34,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
+# The git tool (SPEC §8) shells out to the real git binary, which the
+# slim base image does not ship. Kept as its own layer so the Chromium
+# package list above stays the verbatim list from SPEC §4.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install Python dependencies
 COPY pyproject.toml ./
 RUN pip install --no-cache-dir -e .

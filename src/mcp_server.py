@@ -31,6 +31,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+# ── Feature toggle framework (SPEC §10) ──────────────────────────────
+#
+# Read ONCE at startup. When a flag is off the corresponding tools are
+# never registered with FastMCP — they are absent from the MCP surface,
+# not present-but-refusing. That distinction is the whole point: a tool
+# that exists and returns "disabled" is still an attack surface and
+# still shows up in list_tools().
+#
+# Default is on, for local docker-compose dev. docker-compose.yml sets
+# it explicitly anyway, so the "on for local dev" fact is visible in the
+# deployment config rather than buried here (SPEC §10). Any future
+# non-local profile must default it off, as its own reviewed decision.
+
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _env_flag(name: str, default: str = "true") -> bool:
+    return os.environ.get(name, default).strip().lower() in _TRUTHY
+
+
+JUMPBOX_TOOLS_ENABLED = _env_flag("AGENTBOX_ENABLE_JUMPBOX_TOOLS")
+
 # Initialize FastMCP server
 mcp = FastMCP(
     "agentbox",
@@ -421,6 +444,26 @@ async def api_type(request):
     return _rest_result(await asyncio.to_thread(type_in_browser, text))
 
 
+@mcp.custom_route("/api/browser/element", methods=["POST"])
+async def api_element(request):
+    """Describe mode (SPEC §11): identify the element at a coordinate.
+
+    Reads DOM info from the page already being driven — it does not
+    click, and touches nothing outside the browser. Core browser
+    surface, same trust tier as screenshot; not gated by §10's toggle.
+    """
+    body = await _json_body(request)
+    try:
+        x_percent = float(body["x_percent"])
+        y_percent = float(body["y_percent"])
+    except (KeyError, TypeError, ValueError):
+        return JSONResponse(
+            {"success": False, "error": "x_percent and y_percent (numbers) are required"},
+            status_code=400,
+        )
+    return _rest_result(await asyncio.to_thread(get_element_at_percent, x_percent, y_percent))
+
+
 @mcp.custom_route("/api/browser/history", methods=["POST"])
 async def api_history(request):
     body = await _json_body(request)
@@ -619,6 +662,107 @@ async def health() -> str:
         "version": "1.0.0",
         "browser_started": _browser_page is not None,
     })
+
+
+# ── Jumpbox tools (SPEC §8/§9), gated by the §10 toggle ──────────────
+#
+# These are defined INSIDE the conditional on purpose. When the flag is
+# off nothing here is defined, nothing is decorated, and nothing reaches
+# FastMCP's registry — `list_tools()` genuinely does not contain them.
+# Structuring it as a runtime check inside an always-registered tool
+# would leave the tool on the surface, which SPEC §10 explicitly rules
+# out.
+
+if JUMPBOX_TOOLS_ENABLED:
+    import jumpbox_tools
+
+    logger.info(
+        "Jumpbox tools ENABLED (AGENTBOX_ENABLE_JUMPBOX_TOOLS): "
+        "read_file, write_file, list_directory, git, http_request"
+    )
+
+    @mcp.tool()
+    async def read_file(path: str) -> str:
+        """Read a text file from the workspace.
+
+        Args:
+            path: Absolute path inside /workspace
+
+        Returns:
+            JSON string with success and content (first 1MB), or an error
+        """
+        return await jumpbox_tools.read_file(path)
+
+    @mcp.tool()
+    async def write_file(path: str, content: str) -> str:
+        """Write a text file inside the workspace, creating parent directories.
+
+        Args:
+            path: Absolute path inside /workspace
+            content: Text to write (replaces any existing content)
+
+        Returns:
+            JSON string with success, path, bytes_written
+        """
+        return await jumpbox_tools.write_file(path, content)
+
+    @mcp.tool()
+    async def list_directory(path: str) -> str:
+        """List the contents of a workspace directory.
+
+        Args:
+            path: Absolute directory path inside /workspace
+
+        Returns:
+            JSON string with success and entries (name, type, size)
+        """
+        return await jumpbox_tools.list_directory(path)
+
+    @mcp.tool()
+    async def git(action: str, paths: str = ".", message: str = "", count: int = 10) -> str:
+        """Run one of a fixed set of git subcommands in the workspace.
+
+        This is not a general git passthrough — only the listed actions exist.
+
+        Args:
+            action: "init" | "status" | "add" | "commit" | "diff" | "log" | "reset"
+            paths: Space-separated paths for add/reset (default ".")
+            message: Commit message (required for commit)
+            count: Number of log entries, 1-50 (default 10)
+
+        Returns:
+            JSON string with success and output
+        """
+        return await jumpbox_tools.execute_git(action, paths=paths, message=message, count=count)
+
+    @mcp.tool()
+    async def http_request(
+        url: str,
+        method: str = "GET",
+        headers: dict | None = None,
+        body: str = "",
+    ) -> str:
+        """Make an outbound HTTP request to an external host.
+
+        Requests that resolve to loopback, RFC1918, link-local, or CGNAT
+        addresses are refused — this cannot be used to reach internal hosts.
+
+        Args:
+            url: Absolute http:// or https:// URL
+            method: "GET" or "POST"
+            headers: Optional request headers
+            body: Request body, for POST
+
+        Returns:
+            JSON string with success, status, headers, body (first 50k chars)
+        """
+        return await jumpbox_tools.execute_http_request(url, method=method, headers=headers, body=body)
+
+else:
+    logger.info(
+        "Jumpbox tools DISABLED (AGENTBOX_ENABLE_JUMPBOX_TOOLS): "
+        "filesystem, git and http_request tools are not registered"
+    )
 
 
 if __name__ == "__main__":

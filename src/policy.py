@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
 """
-Jumpbox allowlist scaffolding (PRD 1.5 / SPEC §7) — mechanism only.
+Policy: allowlist scaffolding (PRD 1.5 / SPEC §7) and path scoping (SPEC §8).
 
-This module grants nothing. Both lists below are empty, and **nothing in
-this codebase reads them**: there is no `execute_command` tool, no shell
-tool, no route and no MCP tool that consults `COMMAND_ALLOWLIST`. It
-exists so that if a specific, narrow capability is ever needed (reading
-one log source; reaching one internal host once there is a deployment),
-granting it is a reviewed one-line data change against an existing
-extension point — not a redesign improvised under time pressure.
+Two different mechanisms live here.
+
+**The allowlists grant nothing.** Both lists below are empty, and
+**nothing in this codebase reads them**: there is no `execute_command`
+tool, no shell tool, no route and no MCP tool that consults
+`COMMAND_ALLOWLIST`. They exist so that if a specific, narrow capability
+is ever needed (reading one log source; reaching one internal host once
+there is a deployment), granting it is a reviewed one-line data change
+against an existing extension point — not a redesign improvised under
+time pressure.
+
+**`PathPolicy` is live.** It is a different mechanism — path scoping
+rather than an allowlist of specific commands — and it is what confines
+the filesystem tools (SPEC §8) to the workspace directory. It is ported
+from Hill90's `services/agentbox/app/policy.py`.
 
 Two rules this module encodes, both from PRD 1.5:
 
@@ -33,13 +41,19 @@ web (its own browser tool) plus any shell access is the standard
 prompt-injection-to-RCE path. Nothing here builds that, and nothing here
 should be treated as a step toward it.
 
-Deferred to Phase 2 (SPEC §9 item 3): the actual Docker-level
+Deferred to Phase 2 (SPEC §13 item 3): the actual Docker-level
 firewall/iptables enforcement of `NETWORK_ALLOWLIST`. There is nothing
 to restrict until the list has an entry *and* there is a real deployment
 with a network boundary to enforce it against. Wiring firewall rules now
 would be speculative scaffolding against an environment that does not
 exist yet.
 """
+
+import os
+
+# The single directory the filesystem and git tools may touch (SPEC §8).
+# Not "/", and not the container's own source tree.
+WORKSPACE_ROOT = "/workspace"
 
 # Commands this container is ever permitted to execute.
 #
@@ -64,7 +78,7 @@ exist yet.
 #
 # Adding an entry here is not sufficient on its own: it also requires a
 # policy-checked call site, which is a deliberate, separately reviewed
-# decision (PRD 1.2, SPEC §9 item 4). Adding an entry without one
+# decision (PRD 1.2, SPEC §13 item 4). Adding an entry without one
 # changes nothing.
 COMMAND_ALLOWLIST: list[dict] = []
 
@@ -91,3 +105,50 @@ COMMAND_ALLOWLIST: list[dict] = []
 # deployed) is a one-line reviewed addition here, plus the Phase 2
 # network-layer enforcement noted in the module docstring.
 NETWORK_ALLOWLIST: list[str] = []
+
+
+class PathPolicy:
+    """Validates file paths against allowed/denied lists with symlink resolution.
+
+    Ported from Hill90's `services/agentbox/app/policy.py`.
+
+    Every check resolves the path with `os.path.realpath` first, so a
+    symlink inside the workspace pointing at `/etc` is rejected on the
+    resolved target rather than the pretty name. Prefix comparisons are
+    done against `allowed + "/"`, so `/workspaceless` does not pass as a
+    child of `/workspace`.
+
+    This is the only thing standing between the filesystem tools and the
+    rest of the container's filesystem — it is deliberately a default-deny
+    check (a path must match an allowed root) rather than a denylist.
+    """
+
+    def __init__(
+        self,
+        allowed_paths: list[str] | None = None,
+        denied_paths: list[str] | None = None,
+        read_only: bool = False,
+    ):
+        self.allowed = [os.path.realpath(p) for p in (allowed_paths or [WORKSPACE_ROOT])]
+        self.denied = [os.path.realpath(p) for p in (denied_paths or [])]
+        self.read_only = read_only
+
+    def check_read(self, path: str) -> tuple[bool, str]:
+        """Check if a path is allowed for reading. Returns (allowed, reason)."""
+        real = os.path.realpath(path)
+
+        for denied in self.denied:
+            if real == denied or real.startswith(denied + "/"):
+                return False, f"Path '{path}' is in denied list"
+
+        for allowed in self.allowed:
+            if real == allowed or real.startswith(allowed + "/"):
+                return True, "ok"
+
+        return False, f"Path '{path}' is not in allowed paths"
+
+    def check_write(self, path: str) -> tuple[bool, str]:
+        """Check if a path is allowed for writing. Returns (allowed, reason)."""
+        if self.read_only:
+            return False, "Filesystem is read-only"
+        return self.check_read(path)

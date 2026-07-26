@@ -14,6 +14,12 @@ services:
 
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-info}
+      # Feature toggle (SPEC §10). On for local dev, stated explicitly
+      # here so the fact lives in deployment config rather than in code.
+      # Off means the filesystem, git and http_request tools are never
+      # registered with FastMCP at all. Any future non-local profile
+      # must default this to false as its own reviewed decision.
+      - AGENTBOX_ENABLE_JUMPBOX_TOOLS=${AGENTBOX_ENABLE_JUMPBOX_TOOLS:-true}
 
     deploy:
       resources:

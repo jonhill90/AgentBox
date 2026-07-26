@@ -26,10 +26,16 @@ from conftest import EXPECTED_TOOLS, PAGE_ONE, PAGE_TWO, call, mcp_session
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 
-async def test_tool_surface_is_exactly_spec_section_5():
+async def test_spec_section_5_core_tools_ship_unconditionally():
+    """The §5 core list is always registered, whatever the §10 toggle says.
+
+    The exact whole-surface assertion (core + gated, nothing else) lives
+    in test_feature_toggle.py, which knows what the toggle is set to.
+    """
     async with mcp_session() as session:
         tools = {t.name for t in (await session.list_tools()).tools}
-        assert tools == EXPECTED_TOOLS, f"unexpected tool surface: {tools}"
+        missing = EXPECTED_TOOLS - tools
+        assert not missing, f"core browser tools missing: {missing}"
 
 
 async def test_persistent_browser_session():

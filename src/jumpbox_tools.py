@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+"""
+Jumpbox tools: filesystem, git, and http_request (SPEC §8, §9).
+
+Everything in this module is governed by the single feature toggle
+`AGENTBOX_ENABLE_JUMPBOX_TOOLS` (SPEC §10). When that flag is off,
+`mcp_server.py` never registers any of these with FastMCP — they do not
+appear on the MCP surface at all. Importing this module is harmless on
+its own; it grants nothing until something registers a call site.
+
+Ported from Hill90 (read-only reference,
+`/Users/jon/source/repos/Personal/Hill90/services/agentbox/app/`):
+
+  - `filesystem.py`  → `read_file`, `write_file`, `list_directory`
+  - `tools.py::_execute_git`           → `execute_git`
+  - `tools.py::_execute_http_request`  → `execute_http_request`
+  - `tools.py::_is_blocked_host`       → `is_blocked_host`
+
+Two things were dropped in the port because they are Hill90 platform
+concepts that do not exist in this standalone repo: the `EventEmitter`
+telemetry hooks, and `FilesystemConfig`-driven `configure()` (the path
+policy here is fixed to the workspace at import instead of being wired
+from a config object).
+
+Every function returns a JSON *string*, matching this repo's existing
+tool convention, and reports failure as `{"success": false, "error": ...}`
+rather than raising.
+"""
+
+import asyncio
+import ipaddress
+import json
+import os
+import socket
+import urllib.parse
+
+from policy import WORKSPACE_ROOT, PathPolicy
+
+# The one directory these tools may touch. Not "/", not /app.
+WORKSPACE = WORKSPACE_ROOT
+
+# Scoped at import: read/write allowed under the workspace and nowhere
+# else. Deliberately not configurable by environment — widening the
+# blast radius of the filesystem tools should be a reviewed code change,
+# not a deployment-time env var someone can set by accident.
+_policy = PathPolicy(allowed_paths=[WORKSPACE], denied_paths=[], read_only=False)
+
+MAX_READ_BYTES = 1_000_000       # 1MB, as Hill90
+MAX_HTTP_RESPONSE_CHARS = 50_000  # as Hill90
+
+
+# ── Filesystem (SPEC §8, from Hill90 filesystem.py) ──────────────────
+
+async def read_file(path: str) -> str:
+    """Read file contents with path policy enforcement."""
+    allowed, reason = _policy.check_read(path)
+    if not allowed:
+        return json.dumps({"success": False, "error": reason})
+
+    try:
+        with open(path) as f:
+            content = f.read(MAX_READ_BYTES)
+        return json.dumps({"success": True, "content": content, "path": path})
+    except FileNotFoundError:
+        return json.dumps({"success": False, "error": f"File not found: {path}"})
+    except IsADirectoryError:
+        return json.dumps({"success": False, "error": f"Not a file: {path}"})
+    except PermissionError:
+        return json.dumps({"success": False, "error": f"Permission denied: {path}"})
+    except UnicodeDecodeError:
+        return json.dumps({"success": False, "error": f"Not a UTF-8 text file: {path}"})
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)[:300]})
+
+
+async def write_file(path: str, content: str) -> str:
+    """Write content to a file with path policy enforcement."""
+    allowed, reason = _policy.check_write(path)
+    if not allowed:
+        return json.dumps({"success": False, "error": reason})
+
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "w") as f:
+            f.write(content)
+        return json.dumps({"success": True, "path": path, "bytes_written": len(content)})
+    except IsADirectoryError:
+        return json.dumps({"success": False, "error": f"Not a file: {path}"})
+    except PermissionError:
+        return json.dumps({"success": False, "error": f"Permission denied: {path}"})
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)[:300]})
+
+
+async def list_directory(path: str) -> str:
+    """List directory contents with path policy enforcement."""
+    allowed, reason = _policy.check_read(path)
+    if not allowed:
+        return json.dumps({"success": False, "error": reason})
+
+    try:
+        entries = []
+        for entry in sorted(os.listdir(path)):
+            full_path = os.path.join(path, entry)
+            try:
+                stat = os.stat(full_path)
+                entries.append({
+                    "name": entry,
+                    "type": "directory" if os.path.isdir(full_path) else "file",
+                    "size": stat.st_size,
+                })
+            except OSError:
+                entries.append({"name": entry, "type": "unknown", "size": 0})
+        return json.dumps({"success": True, "path": path, "entries": entries})
+    except FileNotFoundError:
+        return json.dumps({"success": False, "error": f"Directory not found: {path}"})
+    except NotADirectoryError:
+        return json.dumps({"success": False, "error": f"Not a directory: {path}"})
+    except PermissionError:
+        return json.dumps({"success": False, "error": f"Permission denied: {path}"})
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)[:300]})
+
+
+# ── git (SPEC §8, from Hill90 tools.py::_execute_git) ────────────────
+#
+# A fixed set of subcommands scoped to the workspace — NOT a general git
+# passthrough. There is deliberately no `git <arbitrary args>` path: if a
+# subcommand is not in this list, it is not supported. Adding one is a
+# reviewed change, not a parameter.
+
+GIT_ACTIONS = ("init", "status", "add", "commit", "diff", "log", "reset")
+
+GIT_USER_NAME = os.environ.get("AGENTBOX_GIT_USER_NAME", "AgentBox")
+GIT_USER_EMAIL = os.environ.get("AGENTBOX_GIT_USER_EMAIL", "agentbox@localhost")
+
+
+async def _git(*argv: str) -> tuple[int, str, str]:
+    """Run one git invocation in the workspace. Never uses a shell."""
+    proc = await asyncio.create_subprocess_exec(
+        "git", *argv, cwd=WORKSPACE,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    return proc.returncode, (stdout or b"").decode().strip(), (stderr or b"").decode().strip()
+
+
+async def execute_git(action: str, paths: str = ".", message: str = "", count: int = 10) -> str:
+    """Execute one of the fixed git subcommands in the workspace."""
+    os.makedirs(WORKSPACE, exist_ok=True)
+
+    # Auto-init on first use so the other subcommands work without an
+    # explicit init call (Hill90 does the same).
+    if not os.path.isdir(os.path.join(WORKSPACE, ".git")) and action != "init":
+        for argv in (
+            ("init",),
+            ("config", "user.name", GIT_USER_NAME),
+            ("config", "user.email", GIT_USER_EMAIL),
+        ):
+            await _git(*argv)
+
+    try:
+        if action == "init":
+            outputs = []
+            for argv in (
+                ("init",),
+                ("config", "user.name", GIT_USER_NAME),
+                ("config", "user.email", GIT_USER_EMAIL),
+            ):
+                _rc, out, _err = await _git(*argv)
+                outputs.append(out)
+            return json.dumps({
+                "success": True,
+                "output": "\n".join(filter(None, outputs)) or "Git repo initialized",
+            })
+
+        elif action == "status":
+            _rc, out, _err = await _git("status", "--short")
+            return json.dumps({"success": True, "output": out or "Working tree clean"})
+
+        elif action == "add":
+            targets = paths.split() or ["."]
+            rc, _out, err = await _git("add", *targets)
+            if rc != 0:
+                return json.dumps({"success": False, "error": err})
+            return json.dumps({"success": True, "output": f"Staged: {' '.join(targets)}"})
+
+        elif action == "commit":
+            if not message:
+                return json.dumps({"success": False, "error": "message is required for commit"})
+            rc, out, err = await _git("commit", "-m", message)
+            if rc != 0:
+                if "nothing to commit" in err or "nothing to commit" in out:
+                    return json.dumps({"success": True, "output": "Nothing to commit"})
+                return json.dumps({"success": False, "error": err or out})
+            return json.dumps({"success": True, "output": out})
+
+        elif action == "diff":
+            _rc, out, _err = await _git("diff", "--stat")
+            return json.dumps({"success": True, "output": out or "No changes"})
+
+        elif action == "log":
+            n = min(max(int(count or 10), 1), 50)
+            rc, out, err = await _git("log", "--oneline", f"-{n}")
+            if rc != 0:
+                if "does not have any commits" in err:
+                    return json.dumps({"success": True, "output": "No commits yet"})
+                return json.dumps({"success": False, "error": err})
+            return json.dumps({"success": True, "output": out or "No commits yet"})
+
+        elif action == "reset":
+            targets = paths.split() or ["."]
+            _rc, out, _err = await _git("reset", "HEAD", "--", *targets)
+            return json.dumps({"success": True, "output": out or "Unstaged"})
+
+        else:
+            return json.dumps({"success": False, "error": f"Unknown git action: {action}"})
+
+    except Exception as exc:
+        return json.dumps({"success": False, "error": str(exc)[:300]})
+
+
+# ── http_request (SPEC §9, from Hill90 tools.py) ─────────────────────
+#
+# SSRF protection: resolve the hostname and check the *resolved IP*
+# against the blocklist, rather than string-matching the URL — otherwise
+# a DNS name pointing at 127.0.0.1 walks straight through.
+
+_BLOCKED_CIDRS = [
+    ipaddress.ip_network("127.0.0.0/8"),      # loopback
+    ipaddress.ip_network("10.0.0.0/8"),       # RFC1918
+    ipaddress.ip_network("172.16.0.0/12"),    # RFC1918
+    ipaddress.ip_network("192.168.0.0/16"),   # RFC1918
+    ipaddress.ip_network("169.254.0.0/16"),   # link-local (incl. cloud metadata)
+    ipaddress.ip_network("100.64.0.0/10"),    # CGNAT — the Tailscale range
+]
+
+
+def is_blocked_host(hostname: str) -> bool:
+    """True if the hostname resolves into a blocked range (or not at all)."""
+    try:
+        addrs = socket.getaddrinfo(hostname, None, socket.AF_INET)
+        for _, _, _, _, (ip, _) in addrs:
+            addr = ipaddress.ip_address(ip)
+            for cidr in _BLOCKED_CIDRS:
+                if addr in cidr:
+                    return True
+    except socket.gaierror:
+        return True  # Can't resolve — block
+    return False
+
+
+async def execute_http_request(
+    url: str,
+    method: str = "GET",
+    headers: dict | None = None,
+    body: str = "",
+) -> str:
+    """Make an outbound HTTP request with SSRF protection."""
+    import httpx
+
+    method = (method or "GET").upper()
+    headers = headers or {}
+
+    if method not in ("GET", "POST"):
+        return json.dumps({"success": False, "error": "method must be GET or POST"})
+    if not url or not url.startswith(("http://", "https://")):
+        return json.dumps({"success": False, "error": "url must start with http:// or https://"})
+
+    parsed = urllib.parse.urlparse(url)
+    hostname = parsed.hostname or ""
+    if not hostname:
+        return json.dumps({"success": False, "error": "Invalid URL"})
+
+    # NETWORK_ALLOWLIST (SPEC §7) is where a future reviewed exception to
+    # this blocklist would be checked — before the rejection below, never
+    # by removing an entry from _BLOCKED_CIDRS. No exception exists yet,
+    # so there is deliberately no carve-out code here to go stale.
+    if is_blocked_host(hostname):
+        return json.dumps({"success": False, "error": "Blocked: internal/private IP range"})
+
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True, max_redirects=3) as client:
+            if method == "GET":
+                res = await client.get(url, headers=headers)
+            else:
+                res = await client.post(url, headers=headers, content=body)
+
+            text = res.text[:MAX_HTTP_RESPONSE_CHARS]
+            return json.dumps({
+                "success": True,
+                "status": res.status_code,
+                "headers": dict(list(res.headers.items())[:20]),
+                "body": text,
+                "truncated": len(res.text) > MAX_HTTP_RESPONSE_CHARS,
+            })
+    except Exception as exc:
+        return json.dumps({"success": False, "error": str(exc)[:300]})

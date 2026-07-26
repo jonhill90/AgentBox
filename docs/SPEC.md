@@ -70,17 +70,18 @@ the tool-registration glue changes.
 - Update `pyproject.toml` dependencies: add `playwright`, remove
   anything that only existed for `execute_command`/`manage_process`.
 
-## 5. Tool surface (exact list — nothing beyond this)
+## 5. Tool surface (core list)
 
 `navigate`, `screenshot`, `click` (by selector), `get_text`,
 `evaluate` (JS), `click_at_percent`, `type_at`, `press_key`, `scroll`,
-`history` (back/forward/reload), `health`.
+`history` (back/forward/reload), `health`. These ship unconditionally,
+same as before.
 
-Explicitly not in scope: `execute_command`, `manage_process`,
-filesystem tools, git tools, `http_request`, knowledge/AKM tools. If
-you find yourself wanting to add one of these to make something
-easier, stop and flag it instead — it's an out-of-scope decision, not
-a Phase 1 implementation detail.
+§8/§9 add filesystem, git, and `http_request` tools **behind the
+feature-toggle framework in §10** — additive, not a change to this
+core list. A future terminal is its own separate build, also
+toggle-gated. AKM/knowledge tools remain permanently out of scope —
+never add them, don't flag them as a future maybe.
 
 ## 6. Take-control viewer UI (PRD 1.4)
 
@@ -151,14 +152,108 @@ host) is a small config change later, not a redesign.
   there's nothing to restrict until `NETWORK_ALLOWLIST` has an entry
   and there's an actual deployment target (Phase 2) with a real network
   boundary to enforce it against. Document in `src/policy.py` that this
-  is deferred, and why (§8 item 3 already tracks the real version of
+  is deferred, and why (§13 item 3 already tracks the real version of
   this for Phase 2).
 - One test: `COMMAND_ALLOWLIST == []` and `NETWORK_ALLOWLIST == []` (or
   whatever documented baseline) as of this commit — a trivial assertion,
   but it's the trip-wire that makes a future accidental addition show
   up as an intentional diff instead of silent scope creep.
 
-## 8. Non-Functional Requirements
+## 8. Filesystem and git tools (PRD 1.7)
+
+Port, don't rewrite, from Hill90 (read-only reference —
+`/Users/jon/source/repos/Personal/Hill90/services/agentbox/app/`):
+
+- `filesystem.py` → `read_file`, `write_file`, `list_directory`. Port
+  `PathPolicy` from Hill90's `policy.py` alongside it (realpath-resolved
+  allow/deny lists, explicit read-only mode) — this repo's own
+  `src/policy.py` currently only has `COMMAND_ALLOWLIST`/
+  `NETWORK_ALLOWLIST` from §7; add `PathPolicy` as its own class in the
+  same module, it's a different mechanism (path scoping, not an
+  allowlist of specific commands).
+- Configure `PathPolicy` scoped to a single workspace directory (e.g.
+  `/workspace`, matching the volume already in `docker-compose.yml`) —
+  not `/`, not the container's own source tree.
+- `tools.py`'s `_execute_git` → a `git` tool exposing exactly the
+  existing fixed subcommand set (`init`, `status`, `add`, `commit`,
+  `diff`, `log`, `reset`), scoped to that same workspace directory.
+  This is not a general git passthrough — do not add `git <arbitrary
+  args>`; if a subcommand isn't in that list, it isn't supported.
+- All three filesystem functions and the git tool are registered as
+  MCP tools **only when the feature-toggle flag from §10 is on** —
+  wire the toggle check in from the start, don't add these unguarded
+  and gate them in a later pass.
+
+## 9. `http_request` tool (PRD 1.8)
+
+Port Hill90's `_execute_http_request` and `_is_blocked_host` verbatim
+in logic: resolve the target hostname, check the resolved IP against
+the blocklist (loopback `127.0.0.0/8`, RFC1918 `10.0.0.0/8` /
+`172.16.0.0/12` / `192.168.0.0/16`, link-local `169.254.0.0/16`, and
+the Tailscale CGNAT range `100.64.0.0/10`), reject if blocked,
+otherwise perform the request. Also gated by the §10 toggle.
+
+`NETWORK_ALLOWLIST` (§7) is where a future specific exception (e.g.
+`dev.debatewho.com`, once Phase 2 exists and this tool needs to reach
+it) gets added — as an explicit carve-out checked *before* the
+blocklist rejects it, not by removing anything from the blocklist
+itself. No such exception exists yet; don't add one speculatively.
+
+## 10. Feature-toggle framework (PRD 1.9)
+
+Governs §8 and §9 now, and the terminal in a later pass.
+
+- Add `AGENTBOX_ENABLE_JUMPBOX_TOOLS` (env var, default `"true"` for
+  local `docker-compose` dev — set it explicitly in
+  `docker-compose.yml`/`.env.example` rather than relying on the
+  Python-side default, so the "on for local dev" fact is visible in
+  the deployment config, not buried in code).
+  read once at server startup in `src/mcp_server.py`.
+- When the flag is off: the filesystem tools, the git tool, and the
+  `http_request` tool are **not registered** with FastMCP at all —
+  structure the registration so this is a conditional `@mcp.tool()`
+  application (or an equivalent "only define/register if enabled"
+  pattern), not a runtime check inside an always-registered tool that
+  returns an error when disabled. The tool must not exist on the MCP
+  surface when off, not exist-but-refuse.
+- Trip-wire tests: with the flag off (test sets the env var before the
+  container starts, or exercises whatever the equivalent local check
+  is), assert `list_tools()` does not include `read_file`,
+  `write_file`, `list_directory`, `git`, or `http_request`. With the
+  flag on (the default, so this is what the existing suite already
+  exercises), assert they do.
+- Do not flip the default off as part of this work — §10's job is
+  building the toggle and proving it works both ways with tests, not
+  changing today's local-dev behavior. Actually running with it off to
+  "prove DebateWho-off is real" (PRD 1.9's last requirement) happens
+  later, deliberately, right before Phase 2 planning — not bundled into
+  this commit.
+
+## 11. Describe element-picker mode (PRD 1.4, deferred from §6)
+
+Promote this out of "optional, skip if not quick" now that it's
+explicitly wanted:
+
+- Expose Hill90's `get_element_at_percent` (already ported and present
+  in `src/mcp_server.py`, currently unused by any route) as
+  `POST /api/browser/element` — thin wrapper, same pattern as the
+  other `/api/browser/*` routes from §6.
+- Frontend: a **Describe** toggle next to Take Control (only visible/
+  usable when Take Control is on, matching Hill90's
+  `SessionPane.tsx` behavior). When Describe is on, clicking the image
+  calls `/api/browser/element` instead of posting a real click, and
+  shows a small popover near the click point with the element's tag,
+  id, classes, text, and selector — read-only info, no chat/annotation
+  send step is needed here (Hill90's version sends the description to
+  its own chat thread, which doesn't exist in this standalone repo;
+  just display the info in the popover).
+- This is browser-tool-surfaced information only (`get_element_at_percent`
+  doesn't touch the filesystem/git/http_request/network — it reads DOM
+  info from the page already being driven). It is **not** gated by the
+  §10 toggle; it's part of the core browser/UI feature set from §6,
+  same trust tier as `screenshot` or `click`.
+
+## 12. Non-Functional Requirements
 
 - Must run entirely locally via `docker-compose up` — no cloud
   dependency, no Tailscale, no auth layer. It is fine (expected) that
@@ -177,7 +272,7 @@ host) is a small config change later, not a redesign.
 - Update `README.md` to describe the new tool set and drop the
   `execute_command`/`manage_process` documentation.
 
-## 9. Open Items (Phase 2 — do not design or build yet)
+## 13. Open Items (Phase 2 — do not design or build yet)
 
 1. OAuth wrapper approach (Cloudflare Worker `workers-oauth-provider`
    template vs. hand-rolled DCR/CIMD).
@@ -189,10 +284,17 @@ host) is a small config change later, not a redesign.
    `dev.debatewho.com`? Default assumption is no. This is where the
    Docker-level firewall/iptables enforcement deferred in §7 actually
    gets built, once there's a real deployment target to enforce it on.
-4. Whether a real jumpbox capability (first entries in §7's
-   `COMMAND_ALLOWLIST`) ever gets added, what it's specifically for
-   (e.g. reading a named log source), and with a policy at least as
-   strict as Hill90's `CommandPolicy` (`shell=False`, resolved-path
-   allowlist, scrubbed env) — never a general shell, never a PTY, and
-   never the original unrestricted `shell=True` version from this
-   repo's first commit.
+4. The terminal (Hill90's `ws_terminal.py`/`pty_shell.py`/
+   `XTerminal.tsx` — a real interactive PTY, not a policy-checked
+   command tool). Its own dedicated build, its own PRD/SPEC entry when
+   that starts, gated by §10's toggle framework from the moment it
+   exists, and — same as §8/§9 — genuinely absent from the MCP/route
+   surface when the toggle is off, not merely unlinked from the UI.
+5. Whether §8/§9's tools, and the eventual terminal, actually get
+   flipped off and verified off (PRD 1.9's last requirement) before
+   Phase 2 planning starts — this needs to actually happen once, not
+   just be assumed because a toggle exists.
+6. For the terminal specifically, when it's built: carry over Hill90's
+   own precedent of gating even local/dev access with a bearer token
+   on the WebSocket (`?token=<WORK_TOKEN>`) — Hill90 doesn't expose it
+   unauthenticated even to itself, and AgentBox shouldn't either.

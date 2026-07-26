@@ -140,20 +140,107 @@ Nothing here builds that.
   viewer, a specific internal host) it can be granted narrowly instead
   of reached for broadly.
 
+### 1.6 Revised direction: full Hill90 tool parity minus AKM
+
+**Decision (supersedes the "browser-only" framing above):** AgentBox
+should become a full-featured, self-contained agent sandbox — everything
+Hill90's `services/agentbox` has, minus the two knowledge/AKM tools,
+which are permanently out of scope (AKM is a Hill90-specific concept —
+a shared Postgres+pgvector knowledge base tied to Hill90's own
+multi-agent platform — and will never be added here). Everything else
+(filesystem, git, `http_request`, and a real interactive terminal) is
+in scope, so this can be "a full-featured thing usable with any
+harness to help with vision," not just a browser.
+
+**The reason this is safe to do now, when it wasn't safe to wave through
+casually earlier:** every tool added under this heading is built and
+run in a fully local, unauthenticated, single-operator Docker
+environment — nobody but the operator can reach it. The risk that
+justified excluding a full shell earlier (an OAuth-exposed, publicly
+reachable agent that also reads untrusted web content having
+unrestricted execution next to production infrastructure) is a Phase 2
+risk, not a Phase 1 one. Building broad capability now, in a
+context where it's safe to build, and gating it hard before it is ever
+exposed, is the right sequencing — see 1.9.
+
+### 1.7 Filesystem and git tools
+
+**User story:** As an agent (or the operator, through the same tools),
+I can read/write files and make git commits inside a scoped workspace
+directory, the same way Hill90's agent can.
+
+**Requirements:**
+
+- Ported from Hill90's `services/agentbox/app/filesystem.py`
+  (`read_file`, `write_file`, `list_directory`, all `PathPolicy`-gated
+  — realpath-resolved allow/deny, explicit read-only mode) and the
+  `git` tool in `services/agentbox/app/tools.py` (`_execute_git`),
+  which is itself already structured, not a raw shell: a fixed set of
+  subcommands (`init`, `status`, `add`, `commit`, `diff`, `log`,
+  `reset`) scoped to one workspace directory — port it as that same
+  fixed subcommand set, not as arbitrary `git <anything>`.
+- Both are read-only reference from Hill90; port the logic, don't
+  modify that repo.
+
+### 1.8 `http_request` tool (SSRF-protected)
+
+**User story:** As an agent, I can make outbound HTTP requests to
+external APIs, the way Hill90's agent can — without being able to pivot
+into internal/private networks by doing so.
+
+**Requirements:**
+
+- Ported from Hill90's `_execute_http_request` / `_is_blocked_host`:
+  blocks loopback, RFC1918, link-local, and — notably — the Tailscale
+  CGNAT range (`100.64.0.0/10`), by resolving the hostname and checking
+  the resolved IP against the blocklist, not just string-matching the
+  URL.
+- This tool's future host exceptions (e.g. eventually allowing
+  `dev.debatewho.com` specifically once Phase 2 exists) go through
+  `NETWORK_ALLOWLIST` from 1.5 — the blocklist is the permanent
+  default-deny baseline; the allowlist is where specific, reviewed
+  exceptions get added later, never by loosening the blocklist itself.
+
+### 1.9 Feature-toggle framework (governs 1.7, 1.8, and the terminal)
+
+**User story:** As the operator, I want to build full capability now
+and be confident it is genuinely off — not just unlinked from the UI —
+in any profile other than local dev, before this ever gets near
+DebateWho's infrastructure.
+
+**Requirements:**
+
+- Every tool added under 1.7, 1.8, and the eventual terminal is gated
+  by an explicit, environment-driven flag (e.g.
+  `AGENTBOX_ENABLE_JUMPBOX_TOOLS=true`), read once at server startup.
+  When a flag is off, the corresponding MCP tool(s) and REST route(s)
+  are **not registered at all** — not hidden, not just unlinked from
+  the `/ui` page. This must be enforced by the server, not by
+  convention.
+- Default: **on** for local `docker-compose` dev (matches this
+  project's current phase). The moment any deployment profile besides
+  local dev exists (Phase 2), that profile's default must be **off**,
+  and turning any of these on for a non-local profile is its own
+  reviewed decision, not inherited automatically.
+- A trip-wire test per flag: with the flag off, assert the tool/route
+  is genuinely absent (a 404 or a `list_tools()` surface that doesn't
+  include it) — not just "the UI doesn't show a button for it."
+- Before Phase 2 planning starts in earnest, actually flip every one of
+  these flags off once, prove the server still starts and the browser
+  tool/UI still work, and only then treat "off for DebateWho" as a
+  verified fact rather than an assumption.
+
 ### Out of Scope for Phase 1
 
-- Any auth/OAuth layer.
+- Any auth/OAuth layer (beyond a bearer-token gate on the terminal
+  itself, ported from Hill90 — see the terminal's own future PRD entry).
 - Any cloud or VPS deployment.
 - Any Tailscale networking or configuration.
 - Any DebateWho-specific configuration or code.
-- Any actual shell/exec tool, and any interactive PTY/terminal (Hill90's
-  `ws_terminal.py`/`pty_shell.py`/`XTerminal.tsx` pattern) — not ruled
-  out forever, but never added casually alongside something else; each
-  would need its own deliberate scoping decision the way this section
-  itself was one.
-- Hill90's non-browser tools (filesystem, git, `http_request`,
-  knowledge/AKM, chat orchestration). AgentBox Phase 1 is browser-only,
-  plus the empty allowlist scaffolding in 1.5.
+- AKM/knowledge tools — permanently out of scope, not deferred.
+- The terminal itself is scoped separately (its own PRD/SPEC entry, a
+  dedicated follow-up build) rather than bundled into 1.7/1.8, since
+  it's the highest-risk single piece and deserves its own focused pass.
 
 ## Phase 2 (future — do not build yet)
 
