@@ -134,6 +134,31 @@ There is **no shell or exec tool**, and no filesystem, git, or HTTP tool. A
 browser-only box has a far smaller blast radius, and adding any of those back is
 a deliberate Phase 2 decision — see PRD §1.2 and SPEC §7.
 
+## Allowlist scaffolding (`src/policy.py`)
+
+`src/policy.py` holds two empty lists — `COMMAND_ALLOWLIST` and
+`NETWORK_ALLOWLIST` — and **nothing reads them**. They are an extension point,
+not a feature: if a narrow capability is ever needed (one log source, one
+internal host), granting it should be a reviewed one-line data change against a
+structure that already exists, rather than a redesign improvised at the time.
+
+Two rules the module encodes: the allowlist is *data, not code*, so capabilities
+arrive as small obvious diffs instead of new conditional logic at a call site;
+and network enforcement must not rely on application-level checks alone, since an
+in-process check can contain a structured HTTP tool but never a real shell.
+
+Nothing enforces `NETWORK_ALLOWLIST` today. Actual Docker/firewall enforcement is
+deferred to Phase 2 — there is nothing to restrict until the list has an entry
+and a real deployment exists to enforce it against. The container's ordinary
+outbound access is the browser tool's baseline (its job is navigating to
+arbitrary URLs) and is deliberately *not* the same claim as "tool egress is
+unrestricted". `tests/test_policy.py` asserts both lists are still empty, so a
+future addition surfaces as an intentional diff.
+
+There is still no `execute_command`, no shell tool, and no PTY — see PRD 1.5 for
+why a full interactive shell is rejected for the agent-facing case rather than
+merely postponed.
+
 ## Testing
 
 ```bash
@@ -170,6 +195,8 @@ Chromium page survives real tool calls.
   click/type/keypress/scroll actually move the real page, REST and MCP are
   proven to drive the *same* page, and `/api/screenshot` 404s — without
   launching Chromium — until something has navigated.
+- `tests/test_policy.py` — the allowlist trip-wire: both lists still empty, and
+  the server still does not reference them. Needs no container.
 
 ## Architecture
 
@@ -183,7 +210,8 @@ python:3.12-slim-bookworm
     │   ├── persistent browser loop (daemon thread, owns the Page)
     │   ├── FastMCP streamable-http on :8000 → :8054
     │   └── plain REST routes for the viewer (same internal functions)
-    └── ui.html   (served at /ui, inline JS, no build step)
+    ├── policy.py  (empty allowlist scaffolding — unused by design)
+    └── ui.html    (served at /ui, inline JS, no build step)
 ```
 
 Debian is required: Playwright/Chromium does not run on musl libc, so an Alpine

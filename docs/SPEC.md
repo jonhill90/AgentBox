@@ -121,7 +121,44 @@ the agent's tool implementation directly, not through MCP.
   doesn't cost much more.
 - No auth on any of this (matches PRD 1.3/1.4) — it's a local dev tool.
 
-## 7. Non-Functional Requirements
+## 7. Jumpbox allowlist scaffolding (PRD 1.5) — mechanism only
+
+This grants no new capability. It builds the extension points so a
+future narrow capability (a specific log source, a specific reachable
+host) is a small config change later, not a redesign.
+
+- New module `src/policy.py`:
+  - `COMMAND_ALLOWLIST: list[dict]` — empty list to start. Each future
+    entry is `{"binary": "<resolved-or-resolvable-path>", "args": [...]}`
+    shape, checked the way Hill90's `CommandPolicy.check()` does
+    (resolve to a real absolute path via `shutil.which`, reject
+    anything not on the list, `shell=False`, scrubbed env if anything
+    is ever added). No caller in this codebase invokes it yet — there
+    is no `execute_command` tool or route. It exists so that adding one
+    later means adding a policy-checked call site, not building the
+    checking logic from scratch under time pressure.
+  - `NETWORK_ALLOWLIST: list[str]` — empty list to start (or, if the
+    container's default network access already permits open internet
+    egress for browser navigation, document that explicitly here as
+    the current baseline and treat this list as *additional* specific
+    hosts beyond that baseline — do not conflate "browser can navigate
+    anywhere on the open internet" with "shell/tool egress is
+    unrestricted").
+  - A short docstring/comment in the module explaining the two rules
+    from PRD 1.5: allowlist is data, not code; network enforcement
+    must not rely on application-level checks alone.
+- Do not wire a Docker-level firewall/iptables rule for this yet —
+  there's nothing to restrict until `NETWORK_ALLOWLIST` has an entry
+  and there's an actual deployment target (Phase 2) with a real network
+  boundary to enforce it against. Document in `src/policy.py` that this
+  is deferred, and why (§8 item 3 already tracks the real version of
+  this for Phase 2).
+- One test: `COMMAND_ALLOWLIST == []` and `NETWORK_ALLOWLIST == []` (or
+  whatever documented baseline) as of this commit — a trivial assertion,
+  but it's the trip-wire that makes a future accidental addition show
+  up as an intentional diff instead of silent scope creep.
+
+## 8. Non-Functional Requirements
 
 - Must run entirely locally via `docker-compose up` — no cloud
   dependency, no Tailscale, no auth layer. It is fine (expected) that
@@ -140,17 +177,22 @@ the agent's tool implementation directly, not through MCP.
 - Update `README.md` to describe the new tool set and drop the
   `execute_command`/`manage_process` documentation.
 
-## 8. Open Items (Phase 2 — do not design or build yet)
+## 9. Open Items (Phase 2 — do not design or build yet)
 
 1. OAuth wrapper approach (Cloudflare Worker `workers-oauth-provider`
    template vs. hand-rolled DCR/CIMD).
 2. Deployment target: DebateWho's VPS/Traefik, new subdomain,
    `policy.hujson`/DNS entries — none of this exists yet and shouldn't
    be scaffolded speculatively in Phase 1.
-3. Security scoping once tailnet-reachable: should this box reach
-   anything besides `dev.debatewho.com`? Default assumption is no.
-4. Whether `execute_command` ever gets added back, and if so, with a
-   policy at least as strict as Hill90's `CommandPolicy`
-   (`shell=False`, resolved-path allowlist, scrubbed env) — never the
-   original unrestricted `shell=True` version from this repo's first
-   commit.
+3. Security scoping once tailnet-reachable: the real, enforced version
+   of §7's `NETWORK_ALLOWLIST` — should this box reach anything besides
+   `dev.debatewho.com`? Default assumption is no. This is where the
+   Docker-level firewall/iptables enforcement deferred in §7 actually
+   gets built, once there's a real deployment target to enforce it on.
+4. Whether a real jumpbox capability (first entries in §7's
+   `COMMAND_ALLOWLIST`) ever gets added, what it's specifically for
+   (e.g. reading a named log source), and with a policy at least as
+   strict as Hill90's `CommandPolicy` (`shell=False`, resolved-path
+   allowlist, scrubbed env) — never a general shell, never a PTY, and
+   never the original unrestricted `shell=True` version from this
+   repo's first commit.

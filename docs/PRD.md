@@ -96,16 +96,64 @@ see what it's doing and decide what to build next by looking at it.
   have, not required for this to be usable — build Take Control +
   screenshot + nav chrome first; add Describe only if it's quick.
 
+### 1.5 Jumpbox allowlist scaffolding (mechanism only — grants nothing yet)
+
+**User story:** As the operator, I want AgentBox to be able to gain new,
+narrow capabilities over time (e.g. reading a specific log source, or
+reaching one specific internal host once this is on DebateWho's VPS)
+without ever re-opening its security model to do it — each addition
+should be a small, reviewable, reversible change, not a rebuild.
+
+**Why this exists:** the eventual purpose of this box (once deployed,
+Phase 2) is a "jumpbox" the agent uses because it has no other way to
+reach a network Claude Code Web sessions can't otherwise touch — that
+is a deliberate, security-first design, not a general-purpose dev
+shell. A full interactive shell/PTY is explicitly rejected for the
+agent-facing case: it cannot be contained by command-allowlisting
+alone (once a real shell is available, allowlisting individual
+binaries doesn't stop chaining them), and an agent that also reads
+untrusted content from the open web (its own browser tool) combined
+with any shell access is a standard prompt-injection-to-RCE path.
+Nothing here builds that.
+
+**Requirements:**
+
+- A command allowlist as **data, not code** — an explicit, empty (or
+  near-empty) config listing exactly which resolved-absolute-path
+  binaries and argument shapes are ever permitted, in the same spirit
+  as Hill90's `CommandPolicy` (`shell=False`, resolved paths, scrubbed
+  env — never the unrestricted `shell=True` this repo's first commit
+  had). Empty today; adding one entry later is a one-line, reviewed
+  change.
+- A network-egress allowlist as **data, not code** — an explicit,
+  empty (or near-empty) list of hosts this container may reach beyond
+  localhost, enforced at the Docker network layer (not just checked in
+  application code — app-level checks alone don't contain a real
+  shell the way they can contain a structured HTTP tool). Empty today
+  (this box currently only needs to reach whatever URL an agent
+  navigates it to over the open internet); a future host (e.g.
+  `dev.debatewho.com`, once Phase 2 exists) is again a one-line,
+  reviewed addition, not a redesign.
+- No shell tool, no PTY, no `execute_command` is added by this
+  requirement. This is purely the extension mechanism, wired in but
+  unused, so that when a specific real need shows up later (a log
+  viewer, a specific internal host) it can be granted narrowly instead
+  of reached for broadly.
+
 ### Out of Scope for Phase 1
 
 - Any auth/OAuth layer.
 - Any cloud or VPS deployment.
 - Any Tailscale networking or configuration.
 - Any DebateWho-specific configuration or code.
-- The shell/exec tools from the original AgentBox.
+- Any actual shell/exec tool, and any interactive PTY/terminal (Hill90's
+  `ws_terminal.py`/`pty_shell.py`/`XTerminal.tsx` pattern) — not ruled
+  out forever, but never added casually alongside something else; each
+  would need its own deliberate scoping decision the way this section
+  itself was one.
 - Hill90's non-browser tools (filesystem, git, `http_request`,
-  knowledge/AKM, chat orchestration, WebSocket terminal). AgentBox
-  Phase 1 is browser-only.
+  knowledge/AKM, chat orchestration). AgentBox Phase 1 is browser-only,
+  plus the empty allowlist scaffolding in 1.5.
 
 ## Phase 2 (future — do not build yet)
 
