@@ -29,6 +29,9 @@ services:
           pids: 200
 
     volumes:
+      # The workspace the filesystem and git tools are scoped to (SPEC §8).
+      # Named volume so written files survive `docker compose down`.
+      - agentbox-workspace:/workspace
       - agentbox-screenshots:/workspace/screenshots
 
     healthcheck:
@@ -41,4 +44,5 @@ services:
     restart: unless-stopped
 
 volumes:
+  agentbox-workspace:
   agentbox-screenshots:

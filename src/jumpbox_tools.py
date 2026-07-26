@@ -47,6 +47,7 @@ _policy = PathPolicy(allowed_paths=[WORKSPACE], denied_paths=[], read_only=False
 
 MAX_READ_BYTES = 1_000_000       # 1MB, as Hill90
 MAX_HTTP_RESPONSE_CHARS = 50_000  # as Hill90
+MAX_REDIRECTS = 3                 # as Hill90; each hop is re-checked, see below
 
 
 # ── Filesystem (SPEC §8, from Hill90 filesystem.py) ──────────────────
@@ -282,19 +283,53 @@ async def execute_http_request(
         return json.dumps({"success": False, "error": "Blocked: internal/private IP range"})
 
     try:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True, max_redirects=3) as client:
-            if method == "GET":
-                res = await client.get(url, headers=headers)
-            else:
-                res = await client.post(url, headers=headers, content=body)
+        # Redirects are followed manually, one hop at a time, so every hop's
+        # host goes through the same blocklist. Letting httpx follow them
+        # would check only the URL we were handed: a public URL that 302s to
+        # http://169.254.169.254/ would sail straight through to the metadata
+        # service. A blocked hop stops the chain and returns the same
+        # structured refusal as a directly-blocked request.
+        async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
+            request = client.build_request(
+                method, url, headers=headers, content=(body if method == "POST" else None)
+            )
+            for _hop in range(MAX_REDIRECTS + 1):
+                res = await client.send(request)
 
-            text = res.text[:MAX_HTTP_RESPONSE_CHARS]
+                if not res.has_redirect_location:
+                    text = res.text[:MAX_HTTP_RESPONSE_CHARS]
+                    return json.dumps({
+                        "success": True,
+                        "status": res.status_code,
+                        "headers": dict(list(res.headers.items())[:20]),
+                        "body": text,
+                        "truncated": len(res.text) > MAX_HTTP_RESPONSE_CHARS,
+                    })
+
+                # httpx builds the next request for us (including the
+                # POST->GET downgrade on 301/302/303), we just vet it.
+                nxt = res.next_request
+                if nxt is None:
+                    return json.dumps({"success": False, "error": "Invalid redirect"})
+
+                if nxt.url.scheme not in ("http", "https"):
+                    return json.dumps({
+                        "success": False,
+                        "error": f"Blocked: redirect to non-HTTP scheme '{nxt.url.scheme}'",
+                    })
+
+                hop_host = nxt.url.host or ""
+                if not hop_host or is_blocked_host(hop_host):
+                    return json.dumps({
+                        "success": False,
+                        "error": "Blocked: redirect to internal/private IP range",
+                    })
+
+                request = nxt
+
             return json.dumps({
-                "success": True,
-                "status": res.status_code,
-                "headers": dict(list(res.headers.items())[:20]),
-                "body": text,
-                "truncated": len(res.text) > MAX_HTTP_RESPONSE_CHARS,
+                "success": False,
+                "error": f"Too many redirects (limit {MAX_REDIRECTS})",
             })
     except Exception as exc:
         return json.dumps({"success": False, "error": str(exc)[:300]})

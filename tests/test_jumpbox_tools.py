@@ -292,15 +292,28 @@ async def test_http_request_only_allows_get_and_post(method):
         assert "GET or POST" in result["error"], result
 
 
+async def _skip_unless_httpbin_is_up(session):
+    """httpbin is third-party and flaky; a 5xx means skip, not fail.
+
+    The redirect behaviour these tests cover is proved deterministically
+    and offline in tests/test_ssrf_redirects.py — these are the
+    belt-and-braces checks against a real third party.
+    """
+    probe = await call(session, "http_request", {"url": "https://httpbin.org/get"})
+    if not probe["success"]:
+        pytest.skip(f"httpbin unreachable: {probe.get('error')}")
+    if probe["status"] >= 500:
+        pytest.skip(f"httpbin returned {probe['status']}")
+
+
 async def test_http_request_post_sends_a_body():
     async with mcp_session() as session:
+        await _skip_unless_httpbin_is_up(session)
         result = await call(session, "http_request", {
             "url": "https://httpbin.org/post",
             "method": "POST",
             "body": "agentbox-test-body",
         })
-        if not result["success"]:
-            pytest.skip(f"httpbin unavailable: {result.get('error')}")
         assert result["status"] == 200, result
         assert "agentbox-test-body" in result["body"], result["body"][:300]
 
@@ -325,3 +338,30 @@ async def test_tool_results_are_json_strings():
         assert not raw.isError, raw.content
         parsed = json.loads(raw.content[0].text)
         assert parsed["success"] is False
+
+
+async def test_http_request_refuses_a_redirect_into_a_blocked_range():
+    """The deployed path, via a public redirector.
+
+    tests/test_ssrf_redirects.py covers this deterministically and offline;
+    this one proves the shipped container behaves the same against a real
+    third-party redirect. Skipped if the redirector is unavailable.
+    """
+    async with mcp_session() as session:
+        await _skip_unless_httpbin_is_up(session)
+        result = await call(session, "http_request", {
+            "url": "https://httpbin.org/redirect-to?url=http://169.254.169.254/latest/meta-data/",
+        })
+        assert result["success"] is False, f"followed a redirect to the metadata service: {result}"
+        assert "Blocked" in result["error"], result
+
+
+async def test_http_request_still_follows_ordinary_redirects():
+    async with mcp_session() as session:
+        await _skip_unless_httpbin_is_up(session)
+        result = await call(session, "http_request", {
+            "url": "https://httpbin.org/redirect-to?url=https://example.com/",
+        })
+        assert result["success"], result
+        assert result["status"] == 200, result
+        assert "Example Domain" in result["body"], result["body"][:200]

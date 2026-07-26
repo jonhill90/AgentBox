@@ -57,9 +57,12 @@ Configuration lives in `.env` and is read by `docker-compose.yml`:
 | `LOG_LEVEL` | `info` | Server log level |
 | `AGENTBOX_ENABLE_JUMPBOX_TOOLS` | `true` | Register the filesystem/git/http tools (see below) |
 
-The compose file defines one service, no external network, and one named volume
-(`agentbox-screenshots` → `/workspace/screenshots`). Resource limits are 1 CPU,
-1 GB memory, 200 PIDs. No Docker socket is mounted.
+The compose file defines one service, no external network, and two named volumes:
+`agentbox-workspace` → `/workspace` and `agentbox-screenshots` →
+`/workspace/screenshots`. Files written by `write_file` and commits made by the
+`git` tool therefore survive `docker compose down`; remove the volume
+(`docker volume rm agentbox_agentbox-workspace`) to start clean. Resource limits
+are 1 CPU, 1 GB memory, 200 PIDs. No Docker socket is mounted.
 
 ## MCP Tools
 
@@ -115,6 +118,10 @@ Containment, which is the interesting part:
   loopback, RFC1918, link-local (including cloud metadata at 169.254.169.254),
   and the 100.64.0.0/10 CGNAT range Tailscale uses — so a DNS name pointing at
   an internal address does not get through. GET and POST only.
+- **Redirects are followed one hop at a time and every hop is re-checked.** A
+  public URL that 302s to `http://169.254.169.254/` is refused at the redirect,
+  with the same `{"success": false, "error": ...}` shape as a direct block.
+  Chains are capped at 3 hops.
 
 ## Feature toggle
 
@@ -219,7 +226,7 @@ merely postponed.
 
 ```bash
 python3 -m venv .venv-test
-.venv-test/bin/pip install pytest pytest-asyncio 'mcp>=1.2.0'
+.venv-test/bin/pip install pytest pytest-asyncio 'mcp>=1.2.0' httpx
 .venv-test/bin/python -m pytest tests/ -v
 ```
 
@@ -258,6 +265,9 @@ Chromium page survives real tool calls.
 - `tests/test_jumpbox_tools.py` — the gated tools' real behaviour: filesystem
   round-trips, every escape attempt out of `/workspace` refused, git's fixed
   subcommand set, and the SSRF guard against loopback/RFC1918/link-local/CGNAT.
+- `tests/test_ssrf_redirects.py` — the redirect hops specifically, against a
+  throwaway loopback redirect server. Deterministic and offline: no container
+  and no network needed.
 - `tests/test_feature_toggle.py` — the §10 trip-wires. Runs a second container
   with `AGENTBOX_ENABLE_JUMPBOX_TOOLS=false` and asserts the five tools are
   genuinely gone from `list_tools()`, that calling one is an unknown-tool error,
