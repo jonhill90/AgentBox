@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentBox — Browser Viewer</title>
+<style>
+  :root {
+    --bg: #0b1120; --panel: #111a2e; --border: #1e2b45; --text: #e6edf7;
+    --muted: #8296b3; --accent: #d97706; --accent-dim: #78350f; --link: #38bdf8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex; flex-direction: column;
+    background: var(--bg); color: var(--text);
+    font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 6px; padding: 8px 10px;
+    background: var(--panel); border-bottom: 1px solid var(--border); flex: 0 0 auto;
+  }
+  button {
+    font: inherit; color: var(--muted); background: transparent;
+    border: 1px solid var(--border); border-radius: 5px; padding: 4px 9px; cursor: pointer;
+  }
+  button:hover { color: var(--text); background: #1a2540; }
+  button.nav { padding: 4px 8px; font-size: 14px; line-height: 1; }
+  #control.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #url {
+    flex: 1; min-width: 0; font: inherit; color: var(--text);
+    background: #0a1020; border: 1px solid var(--border); border-radius: 5px; padding: 5px 8px;
+  }
+  #url:focus { outline: none; border-color: var(--link); }
+  #stage {
+    flex: 1; min-height: 0; overflow: auto; padding: 10px;
+    display: flex; align-items: flex-start; justify-content: center; outline: none;
+  }
+  #stage.armed { box-shadow: inset 0 0 0 2px rgba(217, 119, 6, .45); }
+  #shot {
+    max-width: 100%; height: auto; border: 1px solid var(--border); border-radius: 6px;
+    display: block; background: #000;
+  }
+  #shot.armed { cursor: crosshair; }
+  #placeholder { margin: auto; text-align: center; color: var(--muted); max-width: 380px; }
+  #placeholder h2 { font-size: 15px; color: var(--text); margin: 0 0 6px; font-weight: 600; }
+  #placeholder p { margin: 4px 0; }
+  code { background: #0a1020; border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
+  footer {
+    flex: 0 0 auto; display: flex; gap: 14px; padding: 5px 10px; color: var(--muted);
+    background: var(--panel); border-top: 1px solid var(--border); font-size: 11.5px;
+  }
+  #status.err { color: #f87171; }
+  #hint { margin-left: auto; }
+</style>
+</head>
+<body>
+
+<header>
+  <button class="nav" id="back" title="Back">&#8592;</button>
+  <button class="nav" id="forward" title="Forward">&#8594;</button>
+  <button class="nav" id="reload" title="Reload">&#8635;</button>
+  <input id="url" type="text" placeholder="Enter URL and press Enter..." spellcheck="false" autocomplete="off">
+  <button id="control" title="When on, clicks / scrolls / keystrokes go to the real page">Take Control</button>
+</header>
+
+<div id="stage" tabindex="-1">
+  <img id="shot" alt="Live browser screenshot" hidden>
+  <div id="placeholder">
+    <h2>Browser not active</h2>
+    <p>The page starts on the first tool call or navigation.</p>
+    <p>Type a URL above, or have an agent call <code>navigate</code> over MCP.</p>
+  </div>
+</div>
+
+<footer>
+  <span id="status">Connecting&hellip;</span>
+  <span id="current"></span>
+  <span id="hint">Take Control off &mdash; view only</span>
+</footer>
+
+<script>
+"use strict";
+// Mirrors Hill90 services/ui/src/app/chat/SessionPane.tsx BrowserView,
+// minus React: poll the screenshot, drive the chrome bar, and forward
+// clicks / scrolls / keystrokes when Take Control is on.
+const POLL_MS = 2000;
+const SCROLL_DEBOUNCE_MS = 100;
+
+const els = {
+  shot: document.getElementById("shot"),
+  placeholder: document.getElementById("placeholder"),
+  stage: document.getElementById("stage"),
+  url: document.getElementById("url"),
+  control: document.getElementById("control"),
+  status: document.getElementById("status"),
+  current: document.getElementById("current"),
+  hint: document.getElementById("hint"),
+};
+
+let takeControl = false;
+let inFlight = false;              // don't stack polls if one is slow
+const scrollAcc = { x: 0, y: 0 };
+let scrollTimer = null;
+
+function setStatus(text, isError) {
+  els.status.textContent = text;
+  els.status.classList.toggle("err", !!isError);
+}
+
+async function post(path, body) {
+  try {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (data && data.success === false && data.error) setStatus(data.error, true);
+    return data;
+  } catch (err) {
+    setStatus("Request failed: " + err.message, true);
+    return null;
+  }
+}
+
+async function refresh() {
+  if (inFlight) return;
+  inFlight = true;
+  try {
+    const res = await fetch("/api/screenshot", { cache: "no-store" });
+    if (res.status === 404) {
+      els.shot.hidden = true;
+      els.placeholder.hidden = false;
+      setStatus("Browser not active");
+      els.current.textContent = "";
+      return;
+    }
+    if (!res.ok) { setStatus("Screenshot failed (" + res.status + ")", true); return; }
+
+    const data = await res.json();
+    if (!data.screenshot) { setStatus(data.error || "No screenshot available", true); return; }
+
+    els.shot.src = "data:image/png;base64," + data.screenshot;
+    els.shot.hidden = false;
+    els.placeholder.hidden = true;
+    els.current.textContent = data.url || "";
+    // Don't fight the operator while they're editing the URL bar.
+    if (document.activeElement !== els.url) els.url.value = data.url || "";
+    setStatus("Live · " + Math.round((data.bytes || 0) / 1024) + " KB");
+  } catch (err) {
+    setStatus("Failed to fetch screenshot", true);
+  } finally {
+    inFlight = false;
+  }
+}
+
+// ── chrome bar ──────────────────────────────────────────────────────
+async function navigate() {
+  const target = els.url.value.trim();
+  if (!target) return;
+  const finalUrl = /^[a-z][a-z0-9+.-]*:/i.test(target) ? target : "https://" + target;
+  setStatus("Navigating…");
+  await post("/api/browser/navigate", { url: finalUrl });
+  await refresh();
+}
+
+async function history(action) {
+  await post("/api/browser/history", { action: action });
+  await refresh();
+}
+
+els.url.addEventListener("keydown", (e) => { if (e.key === "Enter") navigate(); });
+document.getElementById("back").addEventListener("click", () => history("back"));
+document.getElementById("forward").addEventListener("click", () => history("forward"));
+document.getElementById("reload").addEventListener("click", () => history("reload"));
+
+// ── take control ────────────────────────────────────────────────────
+function setTakeControl(on) {
+  takeControl = on;
+  els.control.classList.toggle("on", on);
+  els.control.textContent = on ? "Take Control: ON" : "Take Control";
+  els.shot.classList.toggle("armed", on);
+  els.stage.classList.toggle("armed", on);
+  els.stage.tabIndex = on ? 0 : -1;
+  els.hint.textContent = on
+    ? "Click, scroll, and type go to the page"
+    : "Take Control off — view only";
+  if (on) els.stage.focus();
+}
+els.control.addEventListener("click", () => setTakeControl(!takeControl));
+
+els.shot.addEventListener("click", async (e) => {
+  if (!takeControl) return;
+  const rect = els.shot.getBoundingClientRect();
+  const xPct = Math.round(((e.clientX - rect.left) / rect.width) * 10000) / 100;
+  const yPct = Math.round(((e.clientY - rect.top) / rect.height) * 10000) / 100;
+  els.stage.focus();  // so keystrokes land here next
+  await post("/api/browser/click", { x_percent: xPct, y_percent: yPct });
+  await refresh();
+});
+
+// Wheel fires very fast — accumulate deltas and send one scroll.
+els.shot.addEventListener("wheel", (e) => {
+  if (!takeControl) return;
+  e.preventDefault();
+  scrollAcc.x += e.deltaX;
+  scrollAcc.y += e.deltaY;
+  if (scrollTimer) clearTimeout(scrollTimer);
+  scrollTimer = setTimeout(async () => {
+    const dx = scrollAcc.x, dy = scrollAcc.y;
+    scrollAcc.x = 0; scrollAcc.y = 0;
+    scrollTimer = null;
+    await post("/api/browser/scroll", { delta_x: dx, delta_y: dy });
+    await refresh();
+  }, SCROLL_DEBOUNCE_MS);
+}, { passive: false });
+
+const SPECIAL_KEYS = new Set([
+  "Enter", "Tab", "Escape", "Backspace", "Delete",
+  "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+  "Home", "End", "PageUp", "PageDown",
+]);
+
+els.stage.addEventListener("keydown", async (e) => {
+  if (!takeControl) return;
+  // Never steal keystrokes aimed at the URL bar.
+  const tag = document.activeElement && document.activeElement.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA") return;
+
+  if (SPECIAL_KEYS.has(e.key)) {
+    e.preventDefault();
+    await post("/api/browser/keypress", { key: e.key });
+    await refresh();
+  } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
+    e.preventDefault();
+    await post("/api/browser/type", { text: e.key });
+    await refresh();
+  }
+});
+
+// ── poll ────────────────────────────────────────────────────────────
+setTakeControl(false);
+refresh();
+setInterval(refresh, POLL_MS);
+</script>
+</body>
+</html>

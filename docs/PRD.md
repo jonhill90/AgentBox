@@ -73,6 +73,29 @@ real.
 - No authentication in this phase. The server is not exposed beyond
   the operator's local Docker network.
 
+### 1.4 Take-control viewer UI
+
+**User story:** As the operator, I want to actually watch and drive the
+browser AgentBox is controlling — not just read test output — so I can
+see what it's doing and decide what to build next by looking at it.
+
+**Requirements:**
+
+- Mirrors Hill90's `services/ui/src/app/chat/SessionPane.tsx`
+  `BrowserView` pattern exactly (read-only reference; do not modify
+  Hill90): a screenshot viewer polling roughly every 2 seconds, a
+  chrome bar with back/forward/reload and a URL input that navigates,
+  and a **Take Control** toggle. When Take Control is on, clicking the
+  screenshot image sends a coordinate click to the real page, scrolling
+  the image sends a scroll, and typing while it's focused sends
+  keystrokes — all against the same persistent page AgentBox already
+  drives, not a separate session.
+- Served locally, still no auth (matches PRD 1.3) — this is a dev tool
+  for the operator, not exposed anywhere.
+- "Describe" element-picker mode (Hill90's other toggle) is a nice to
+  have, not required for this to be usable — build Take Control +
+  screenshot + nav chrome first; add Describe only if it's quick.
+
 ### Out of Scope for Phase 1
 
 - Any auth/OAuth layer.

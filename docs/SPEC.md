@@ -82,7 +82,46 @@ you find yourself wanting to add one of these to make something
 easier, stop and flag it instead — it's an out-of-scope decision, not
 a Phase 1 implementation detail.
 
-## 6. Non-Functional Requirements
+## 6. Take-control viewer UI (PRD 1.4)
+
+The MCP tool surface (§5) is machine-facing only — a browser can't
+speak Streamable HTTP MCP directly. The UI needs its own plain HTTP
+surface that calls the *same internal Python functions* the MCP tools
+already wrap (`navigate_browser`, `click_browser_at_percent`,
+`type_in_browser`, `press_key_in_browser`, `scroll_browser`,
+`browser_history`, plus a screenshot getter) — do not have the UI
+speak MCP itself, and do not duplicate the browser-loop logic. This
+mirrors how Hill90's own UI works: its Next.js API routes call into
+the agent's tool implementation directly, not through MCP.
+
+- Add plain Starlette routes to `src/mcp_server.py` via
+  `@mcp.custom_route(...)` (same pattern as the existing `/health`
+  route): `GET /ui` (serves one static HTML page, inline JS, no
+  build step / no Next.js needed for this), `GET /api/screenshot`,
+  `POST /api/browser/navigate`, `POST /api/browser/click`
+  (`x_percent`/`y_percent`), `POST /api/browser/scroll`,
+  `POST /api/browser/keypress`, `POST /api/browser/type`,
+  `POST /api/browser/history`. Each of these is a thin wrapper calling
+  the existing internal function — no new browser logic.
+- `GET /api/screenshot` returns 404 with a clear message if
+  `_browser_page` is `None` yet (mirrors Hill90's "Browser not active"
+  state), otherwise the current PNG (base64 or raw bytes — client's
+  choice) plus the current URL.
+- Frontend behavior to match, from Hill90's
+  `services/ui/src/app/chat/SessionPane.tsx` `BrowserView` (read-only
+  reference): poll `/api/screenshot` every ~2s and repaint the image;
+  chrome bar with back/forward/reload buttons and a URL input that
+  navigates; a **Take Control** toggle — when on, clicking the
+  screenshot image posts a coordinate click, scrolling the image posts
+  a scroll (debounce rapid wheel events), and keydown while the image
+  area is focused posts a keypress or a typed character. When Take
+  Control is off, the image is just a live view, no input is captured.
+- "Describe" element-picker mode is optional for this pass — build
+  screenshot + chrome + Take Control first; add Describe only if it
+  doesn't cost much more.
+- No auth on any of this (matches PRD 1.3/1.4) — it's a local dev tool.
+
+## 7. Non-Functional Requirements
 
 - Must run entirely locally via `docker-compose up` — no cloud
   dependency, no Tailscale, no auth layer. It is fine (expected) that
@@ -94,10 +133,14 @@ a Phase 1 implementation detail.
   proves the persistent-loop pattern works — a test that only checks
   the server imports or `/health` responds is not sufficient evidence
   of Phase 1 being done.
+- For the UI (§6): at least one test that drives `/api/browser/navigate`
+  then reads `/api/screenshot` and gets a real PNG back — the same
+  persistence proof as the MCP-side tests, just through the REST
+  surface instead.
 - Update `README.md` to describe the new tool set and drop the
   `execute_command`/`manage_process` documentation.
 
-## 7. Open Items (Phase 2 — do not design or build yet)
+## 8. Open Items (Phase 2 — do not design or build yet)
 
 1. OAuth wrapper approach (Cloudflare Worker `workers-oauth-provider`
    template vs. hand-rolled DCR/CIMD).

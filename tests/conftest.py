@@ -6,6 +6,7 @@ There are no unit tests with a mocked browser: the whole point of Phase 1
 is proving a real Chromium page survives across real tool calls.
 """
 
+import asyncio
 import json
 import os
 import subprocess
@@ -90,6 +91,32 @@ def payload(result) -> dict:
 async def call(session, name: str, args: dict | None = None) -> dict:
     """Call a tool and return its decoded JSON payload."""
     return payload(await session.call_tool(name, args or {}))
+
+
+# ── REST helpers for the viewer UI surface (SPEC §6) ─────────────────
+
+def _request(path: str, method: str = "GET", body: dict | None = None) -> tuple[int, str, str]:
+    """Return (status, body_text, content_type). Never raises on 4xx/5xx."""
+    data = json.dumps(body).encode() if body is not None else None
+    headers = {"Content-Type": "application/json"} if data else {}
+    req = urllib.request.Request(f"{BASE_URL}{path}", data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return resp.status, resp.read().decode(), resp.headers.get("Content-Type", "")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode(), exc.headers.get("Content-Type", "")
+
+
+async def rest_get(path: str) -> tuple[int, dict | str]:
+    """GET a REST route. JSON responses are decoded; others returned as text."""
+    status, text, ctype = await asyncio.to_thread(_request, path, "GET", None)
+    return status, (json.loads(text) if "json" in ctype else text)
+
+
+async def rest_post(path: str, body: dict) -> tuple[int, dict]:
+    """POST JSON to a REST route and decode the JSON response."""
+    status, text, _ = await asyncio.to_thread(_request, path, "POST", body)
+    return status, json.loads(text)
 
 
 # ── container introspection (for leak checks) ────────────────────────

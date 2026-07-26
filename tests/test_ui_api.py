@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""
+Take-control viewer UI and its REST surface (SPEC.md §6, §7).
+
+The REST routes are thin wrappers over the same internal functions the
+MCP tools call, so the tests that matter most here are the cross-surface
+ones: drive the page over REST, read it back over MCP, and confirm both
+were talking to the one persistent page.
+
+This file sorts last, so the container restart in the final test does
+not disturb anything else.
+"""
+
+import base64
+
+from conftest import (
+    PAGE_ONE,
+    PAGE_TWO,
+    call,
+    health_ok,
+    mcp_session,
+    requires_docker_introspection,
+    rest_get,
+    rest_post,
+    restart_container,
+)
+
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+# A full-viewport input, so a click anywhere on the image focuses it.
+TYPING_PAGE = (
+    "data:text/html,"
+    "<input id=box style='position:absolute;left:0;top:0;width:1280px;height:720px'>"
+)
+
+
+async def test_ui_page_is_served():
+    status, html = await rest_get("/ui")
+    assert status == 200, html
+    assert "<title>AgentBox" in html
+    # The behaviours SPEC §6 requires of the frontend.
+    for marker in ["Take Control", "/api/screenshot", "/api/browser/click",
+                   "/api/browser/scroll", "/api/browser/keypress",
+                   "/api/browser/type", "/api/browser/history",
+                   "/api/browser/navigate"]:
+        assert marker in html, f"UI page never references {marker}"
+    assert "POLL_MS = 2000" in html, "screenshot polling is not ~2s"
+
+
+async def test_navigate_then_screenshot_returns_a_real_png():
+    """SPEC §7: the persistence proof, through REST instead of MCP."""
+    status, nav = await rest_post("/api/browser/navigate", {"url": PAGE_ONE})
+    assert status == 200 and nav["success"], nav
+    assert nav["status"] == 200 and nav["title"] == "Example Domain", nav
+
+    status, shot = await rest_get("/api/screenshot")
+    assert status == 200, shot
+    png = base64.b64decode(shot["screenshot"])
+    assert png.startswith(PNG_MAGIC), "not a PNG"
+    assert len(png) > 1000, f"screenshot suspiciously small: {len(png)} bytes"
+    assert shot["url"].startswith("https://example.com"), shot["url"]
+
+
+async def test_screenshot_reflects_later_navigation():
+    """Polling shows the live page, not a stale first capture."""
+    await rest_post("/api/browser/navigate", {"url": PAGE_ONE})
+    _, first = await rest_get("/api/screenshot")
+
+    await rest_post("/api/browser/navigate", {"url": TYPING_PAGE})
+    _, second = await rest_get("/api/screenshot")
+
+    assert second["url"] != first["url"], "screenshot URL did not follow the navigation"
+    assert second["screenshot"] != first["screenshot"], "screenshot image never changed"
+    assert base64.b64decode(second["screenshot"]).startswith(PNG_MAGIC)
+
+
+async def test_history_buttons_over_rest():
+    await rest_post("/api/browser/navigate", {"url": PAGE_ONE})
+    await rest_post("/api/browser/navigate", {"url": PAGE_TWO})
+
+    status, back = await rest_post("/api/browser/history", {"action": "back"})
+    assert status == 200 and back["success"], back
+    assert "agentbox=second" not in back["url"], back
+
+    _, forward = await rest_post("/api/browser/history", {"action": "forward"})
+    assert forward["success"] and "agentbox=second" in forward["url"], forward
+
+    _, reload = await rest_post("/api/browser/history", {"action": "reload"})
+    assert reload["success"] and "agentbox=second" in reload["url"], reload
+
+
+async def test_take_control_click_and_type_reach_the_real_page():
+    """What the Take Control toggle does: click to focus, then keystrokes."""
+    await rest_post("/api/browser/navigate", {"url": TYPING_PAGE})
+
+    status, clicked = await rest_post("/api/browser/click", {"x_percent": 50, "y_percent": 50})
+    assert status == 200 and clicked["success"], clicked
+    assert clicked["x"] == 640 and clicked["y"] == 360, clicked
+
+    for ch in "hi":
+        status, typed = await rest_post("/api/browser/type", {"text": ch})
+        assert status == 200 and typed["success"], typed
+
+    # Read it back over MCP — a different surface entirely.
+    async with mcp_session() as session:
+        value = await call(session, "evaluate",
+                           {"script": "() => document.getElementById('box').value"})
+        assert value["result"] == '"hi"', (
+            f"REST keystrokes did not land on the page MCP sees: {value['result']!r}"
+        )
+
+
+async def test_keypress_over_rest_reaches_the_real_page():
+    page = ("data:text/html,<input id=box autofocus "
+            "style='position:absolute;left:0;top:0;width:1280px;height:720px'>")
+    await rest_post("/api/browser/navigate", {"url": page})
+    await rest_post("/api/browser/click", {"x_percent": 50, "y_percent": 50})
+    await rest_post("/api/browser/type", {"text": "ab"})
+
+    status, pressed = await rest_post("/api/browser/keypress", {"key": "Backspace"})
+    assert status == 200 and pressed["success"], pressed
+
+    async with mcp_session() as session:
+        value = await call(session, "evaluate",
+                           {"script": "() => document.getElementById('box').value"})
+        assert value["result"] == '"a"', value
+
+
+async def test_scroll_over_rest_moves_the_real_page():
+    page = "data:text/html,<body style='height:5000px'>tall</body>"
+    await rest_post("/api/browser/navigate", {"url": page})
+
+    status, scrolled = await rest_post("/api/browser/scroll", {"delta_x": 0, "delta_y": 400})
+    assert status == 200 and scrolled["success"], scrolled
+
+    async with mcp_session() as session:
+        pos = await call(session, "evaluate", {"script": "() => Math.round(window.scrollY)"})
+        assert int(pos["result"]) > 0, f"page did not scroll: {pos['result']}"
+
+
+async def test_rest_and_mcp_drive_the_same_persistent_page():
+    """Navigate over REST, read over MCP — one page, two surfaces."""
+    await rest_post("/api/browser/navigate", {"url": PAGE_ONE})
+
+    async with mcp_session() as session:
+        text = await call(session, "get_text", {"selector": "body"})
+        assert text["success"] and "Example Domain" in text["text"], text
+
+        # ...and the reverse direction.
+        await call(session, "navigate", {"url": TYPING_PAGE})
+
+    _, shot = await rest_get("/api/screenshot")
+    assert shot["url"].startswith("data:text/html"), shot["url"]
+
+
+async def test_rest_reports_browser_errors_without_dying():
+    status, nav = await rest_post(
+        "/api/browser/navigate",
+        {"url": "https://this-host-does-not-exist-agentbox.invalid/"},
+    )
+    assert status == 200, nav
+    assert nav["success"] is False and "ERR_NAME_NOT_RESOLVED" in nav["error"], nav
+
+    status, hist = await rest_post("/api/browser/history", {"action": "sideways"})
+    assert status == 200 and hist["success"] is False, hist
+    assert "Unknown action" in hist["error"], hist
+
+    # Still alive — and a good URL typed straight after a bad one works.
+    # Without the retry in navigate_browser this fails: the error page
+    # commits mid-flight and Chromium reports the new navigation as
+    # "interrupted by another navigation to chrome-error://chromewebdata/".
+    status, nav = await rest_post("/api/browser/navigate", {"url": PAGE_ONE})
+    assert nav["success"], nav
+    assert nav["status"] == 200, nav
+
+
+async def test_missing_parameters_are_rejected():
+    for path, expected in [
+        ("/api/browser/navigate", "url is required"),
+        ("/api/browser/click", "x_percent and y_percent"),
+        ("/api/browser/keypress", "key is required"),
+        ("/api/browser/type", "text is required"),
+        ("/api/browser/history", "action is required"),
+    ]:
+        status, body = await rest_post(path, {})
+        assert status == 400, f"{path} -> {status} {body}"
+        assert body["success"] is False and expected in body["error"], body
+
+
+async def test_scroll_defaults_to_zero_when_body_is_empty():
+    """The one POST route with no required fields still answers cleanly."""
+    await rest_post("/api/browser/navigate", {"url": PAGE_ONE})
+    status, body = await rest_post("/api/browser/scroll", {})
+    assert status == 200 and body["success"], body
+
+
+@requires_docker_introspection
+async def test_screenshot_404s_before_the_browser_exists():
+    """Mirrors Hill90's "Browser not active" state.
+
+    Polling this route must never launch a browser by itself, or simply
+    opening the viewer would start Chromium behind the operator's back.
+    """
+    restart_container()
+    assert health_ok()
+
+    status, body = await rest_get("/api/screenshot")
+    assert status == 404, body
+    assert body["error"] == "Browser not active", body
+
+    # Poll a few more times: still no browser.
+    for _ in range(3):
+        status, _body = await rest_get("/api/screenshot")
+        assert status == 404
+
+    async with mcp_session() as session:
+        hp = await call(session, "health")
+        assert hp["browser_started"] is False, "polling /api/screenshot launched a browser"
+
+    # And once something does navigate, the route starts serving.
+    _, nav = await rest_post("/api/browser/navigate", {"url": PAGE_ONE})
+    assert nav["success"], nav
+
+    status, shot = await rest_get("/api/screenshot")
+    assert status == 200, shot
+    assert base64.b64decode(shot["screenshot"]).startswith(PNG_MAGIC)

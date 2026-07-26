@@ -3,7 +3,8 @@
 An MCP server that gives an agent a real, **persistent** Chromium browser it can
 drive over Streamable HTTP — navigate, screenshot, click, read text, run JS, and
 click/type/scroll by coordinate, all against the same live page across separate
-tool calls.
+tool calls. It also ships a **take-control viewer** at `/ui` so you can watch
+that page live and grab the wheel yourself.
 
 **Status: Phase 1** — local Docker only, on the operator's machine. No auth, no
 cloud deployment, no Tailscale. See `docs/PRD.md` and `docs/SPEC.md`.
@@ -35,6 +36,7 @@ curl http://localhost:8054/health
 ```
 
 **MCP endpoint**: `http://localhost:8054/mcp` — transport `streamable-http`.
+**Viewer**: <http://localhost:8054/ui>
 
 To add it to an MCP client (Claude Code, MCP Inspector, anything
 Streamable-HTTP-capable):
@@ -81,6 +83,53 @@ leaves the browser alive and usable. `screenshot` also writes a PNG to
 `type_at` given `x_percent`/`y_percent` clicks that point to focus it first;
 without them it types into whatever is already focused.
 
+## Take-control viewer (`/ui`)
+
+Open <http://localhost:8054/ui>. It is one static HTML page with inline JS — no
+build step, no framework, no extra dependencies — modelled on Hill90's
+`SessionPane.tsx` `BrowserView`.
+
+- The screenshot polls every 2 seconds, so you watch the agent work in real time.
+- Back / forward / reload buttons and a URL bar (Enter navigates; a bare host
+  gets `https://` prepended).
+- **Take Control** toggle. While it is on, clicking the image sends a coordinate
+  click to the real page, scrolling sends a scroll (wheel events are accumulated
+  and debounced 100 ms), and typing sends keystrokes — printable characters go
+  to `/api/browser/type`, and Enter/Tab/Escape/Backspace/Delete/arrows/Home/End/
+  PageUp/PageDown go to `/api/browser/keypress`. While it is off, the page is a
+  read-only live view and no input is captured.
+- Before anything has navigated, the viewer shows "Browser not active" — merely
+  opening it never launches Chromium.
+
+Crucially this is the *same* page the MCP tools drive, not a second session: an
+agent can navigate over MCP and you can click the result in the viewer.
+
+"Describe" element-picker mode from Hill90's UI is deliberately **not** built —
+SPEC §6 makes it optional, and it would need an element-inspection REST route
+that is not in the spec's route list.
+
+### REST surface behind the viewer
+
+A browser cannot speak Streamable HTTP MCP, so the viewer has its own plain HTTP
+routes. Each is a thin wrapper over the very same internal function the matching
+MCP tool calls — there is no second copy of the browser logic.
+
+| Route | Body | Notes |
+|---|---|---|
+| `GET /ui` | — | The viewer page |
+| `GET /api/screenshot` | — | `{screenshot: base64 PNG, url, bytes}`; **404** `Browser not active` until a page exists |
+| `POST /api/browser/navigate` | `{url}` | |
+| `POST /api/browser/click` | `{x_percent, y_percent}` | |
+| `POST /api/browser/scroll` | `{delta_x, delta_y}` | Both default to 0 |
+| `POST /api/browser/keypress` | `{key}` | |
+| `POST /api/browser/type` | `{text}` | |
+| `POST /api/browser/history` | `{action}` | `back` \| `forward` \| `reload` |
+
+Browser-level failures return HTTP 200 with `{"success": false, "error": ...}`,
+matching the MCP surface; only malformed requests get a 400. **There is no auth
+on any of this** — anything that can reach the port can drive the browser, which
+is acceptable only because this phase is local-Docker-only.
+
 There is **no shell or exec tool**, and no filesystem, git, or HTTP tool. A
 browser-only box has a far smaller blast radius, and adding any of those back is
 a deliberate Phase 2 decision — see PRD §1.2 and SPEC §7.
@@ -115,6 +164,12 @@ Chromium page survives real tool calls.
   process-count checks proving repeated navigation and screenshot load leak no
   Chromium processes, a regression test that concurrent cold starts build
   exactly one browser, and `docker compose restart` recovery.
+- `tests/test_ui_api.py` — the viewer and its REST routes: `/ui` is served and
+  references every endpoint it needs, `navigate` → `screenshot` returns a real
+  PNG (the SPEC §7 requirement, through REST instead of MCP), Take Control's
+  click/type/keypress/scroll actually move the real page, REST and MCP are
+  proven to drive the *same* page, and `/api/screenshot` 404s — without
+  launching Chromium — until something has navigated.
 
 ## Architecture
 
@@ -123,9 +178,12 @@ python:3.12-slim-bookworm
 ├── Chromium system libs (apt — see Dockerfile)
 ├── Playwright + Chromium browser (/data/browsers)
 ├── Python deps (fastmcp, pydantic, uvicorn, playwright)
-└── src/mcp_server.py
-    ├── persistent browser loop (daemon thread, owns the Page)
-    └── FastMCP streamable-http on :8000 → :8054
+└── src/
+    ├── mcp_server.py
+    │   ├── persistent browser loop (daemon thread, owns the Page)
+    │   ├── FastMCP streamable-http on :8000 → :8054
+    │   └── plain REST routes for the viewer (same internal functions)
+    └── ui.html   (served at /ui, inline JS, no build step)
 ```
 
 Debian is required: Playwright/Chromium does not run on musl libc, so an Alpine
@@ -136,9 +194,13 @@ package list in `SPEC.md` §4 fails to install.
 ### Known limitations (Phase 1, accepted)
 
 - **One page, one client.** All callers share a single page, so two clients
-  driving it at once will interfere. Firing several `navigate` calls
+  driving it at once will interfere. That is the point for the viewer — you and
+  the agent share a page deliberately — but firing several `navigate` calls
   concurrently makes Chromium abort the superseded ones with `ERR_ABORTED`;
   that is normal single-page behaviour, and each caller gets a clean error.
+- **The viewer is a screenshot poll, not a video stream.** Updates land about
+  every 2 seconds (immediately after your own clicks and keystrokes), so fast
+  animations and hover states are not faithfully represented.
 - **No crash recovery.** If Chromium itself dies, tools keep failing until the
   container is restarted; the server does not rebuild the page.
 - **No auth.** Anything that can reach the port can drive the browser. That is

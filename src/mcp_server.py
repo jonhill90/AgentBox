@@ -19,9 +19,10 @@ import logging
 import os
 import threading
 import time
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
-from starlette.responses import JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse
 
 # Configure logging
 logging.basicConfig(
@@ -225,7 +226,22 @@ def get_element_at_percent(x_percent: float, y_percent: float, timeout: float = 
 def navigate_browser(url: str, timeout: float = 35.0) -> dict:
     """Navigate the browser to a URL. Safe to call from any thread/loop."""
     async def _navigate(page):
-        resp = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        # A goto issued right after a failed one races the previous
+        # navigation still settling: Chromium aborts ours and reports
+        # "interrupted by another navigation to chrome-error://...".
+        # Nothing is wrong with the URL, so let the pending navigation
+        # land and try again. Hit by typing a bad URL then a good one in
+        # the viewer's URL bar.
+        attempts = 3
+        for attempt in range(attempts):
+            try:
+                resp = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                break
+            except Exception as exc:
+                if "interrupted by another navigation" not in str(exc) or attempt == attempts - 1:
+                    raise
+                logger.info(f"navigate interrupted, retrying ({attempt + 1}/{attempts - 1}): {url}")
+                await asyncio.sleep(0.4)
         await _capture_live_screenshot_on_loop()
         return {
             "success": True,
@@ -279,6 +295,139 @@ def browser_history(action: str, timeout: float = 15.0) -> dict:
         await _capture_live_screenshot_on_loop()
         return {"success": True, "url": page.url, "title": await page.title()}
     return _run_browser_op(_nav, timeout)
+
+
+# ── Take-control viewer UI (SPEC §6) ─────────────────────────────────
+#
+# A browser cannot speak Streamable HTTP MCP, so the viewer gets its own
+# plain HTTP surface. These routes are thin wrappers over the very same
+# internal functions the MCP tools call — no second implementation of
+# anything, and both surfaces drive the one persistent page. No auth:
+# this is a local dev tool (PRD 1.3/1.4).
+
+UI_HTML_PATH = Path(__file__).resolve().parent / "ui.html"
+
+
+async def _json_body(request) -> dict:
+    """Parse a JSON request body, tolerating an empty or malformed one."""
+    try:
+        body = await request.json()
+        return body if isinstance(body, dict) else {}
+    except Exception:
+        return {}
+
+
+def _rest_result(result: dict) -> JSONResponse:
+    """Wrap an internal function's result dict as a JSON response.
+
+    Browser-level failures (bad URL, unknown key) are reported in the
+    payload with success=false and HTTP 200, matching the MCP surface;
+    only malformed requests get a 4xx.
+    """
+    return JSONResponse(result)
+
+
+@mcp.custom_route("/ui", methods=["GET"])
+async def ui_page(request):
+    """Serve the single-page take-control viewer."""
+    try:
+        return HTMLResponse(UI_HTML_PATH.read_text(encoding="utf-8"))
+    except OSError as exc:
+        logger.error(f"Cannot read UI page at {UI_HTML_PATH}: {exc}")
+        return JSONResponse({"error": "UI page not found"}, status_code=500)
+
+
+@mcp.custom_route("/api/screenshot", methods=["GET"])
+async def api_screenshot(request):
+    """Current PNG of the live page, plus its URL.
+
+    404s with "Browser not active" until something has actually created
+    the page — polling this must never launch a browser on its own.
+    """
+    if _browser_page is None:
+        return JSONResponse({"error": "Browser not active"}, status_code=404)
+
+    def _refresh() -> None:
+        # _capture_live_screenshot_on_loop no-ops when the page is gone.
+        _run_on_browser_loop_sync(_capture_live_screenshot_on_loop(), timeout=15.0)
+
+    try:
+        await asyncio.to_thread(_refresh)
+    except Exception as exc:
+        logger.warning(f"screenshot refresh failed: {exc}")
+
+    if _browser_last_screenshot is None:
+        return JSONResponse({"error": "Browser not active"}, status_code=404)
+
+    return JSONResponse({
+        "screenshot": base64.b64encode(_browser_last_screenshot).decode("ascii"),
+        "url": _browser_last_url,
+        "bytes": len(_browser_last_screenshot),
+    })
+
+
+@mcp.custom_route("/api/browser/navigate", methods=["POST"])
+async def api_navigate(request):
+    body = await _json_body(request)
+    url = body.get("url")
+    if not url:
+        return JSONResponse({"success": False, "error": "url is required"}, status_code=400)
+    return _rest_result(await asyncio.to_thread(navigate_browser, url))
+
+
+@mcp.custom_route("/api/browser/click", methods=["POST"])
+async def api_click(request):
+    body = await _json_body(request)
+    try:
+        x_percent = float(body["x_percent"])
+        y_percent = float(body["y_percent"])
+    except (KeyError, TypeError, ValueError):
+        return JSONResponse(
+            {"success": False, "error": "x_percent and y_percent (numbers) are required"},
+            status_code=400,
+        )
+    return _rest_result(await asyncio.to_thread(click_browser_at_percent, x_percent, y_percent))
+
+
+@mcp.custom_route("/api/browser/scroll", methods=["POST"])
+async def api_scroll(request):
+    body = await _json_body(request)
+    try:
+        delta_x = float(body.get("delta_x", 0) or 0)
+        delta_y = float(body.get("delta_y", 0) or 0)
+    except (TypeError, ValueError):
+        return JSONResponse(
+            {"success": False, "error": "delta_x and delta_y must be numbers"},
+            status_code=400,
+        )
+    return _rest_result(await asyncio.to_thread(scroll_browser, delta_x, delta_y))
+
+
+@mcp.custom_route("/api/browser/keypress", methods=["POST"])
+async def api_keypress(request):
+    body = await _json_body(request)
+    key = body.get("key")
+    if not key:
+        return JSONResponse({"success": False, "error": "key is required"}, status_code=400)
+    return _rest_result(await asyncio.to_thread(press_key_in_browser, key))
+
+
+@mcp.custom_route("/api/browser/type", methods=["POST"])
+async def api_type(request):
+    body = await _json_body(request)
+    text = body.get("text")
+    if not text:
+        return JSONResponse({"success": False, "error": "text is required"}, status_code=400)
+    return _rest_result(await asyncio.to_thread(type_in_browser, text))
+
+
+@mcp.custom_route("/api/browser/history", methods=["POST"])
+async def api_history(request):
+    body = await _json_body(request)
+    action = body.get("action")
+    if not action:
+        return JSONResponse({"success": False, "error": "action is required"}, status_code=400)
+    return _rest_result(await asyncio.to_thread(browser_history, action))
 
 
 # ── MCP tool surface (SPEC §5 — nothing beyond this list) ────────────
