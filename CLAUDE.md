@@ -70,7 +70,7 @@ recorded in `docs/SECURITY.md`; several were bought with real bugs.
 
 ```bash
 docker compose up -d --build          # start (127.0.0.1:8054 only)
-.venv-test/bin/python -m pytest tests/ -q    # 202 tests, ~3 min, needs the container
+.venv-test/bin/python -m pytest tests/ -q    # 260 tests, ~4 min, needs the container
 ```
 
 - MCP endpoint `http://localhost:8054/mcp` (Streamable HTTP) · viewer `/ui`

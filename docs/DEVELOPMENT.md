@@ -20,7 +20,7 @@ python3 -m venv .venv-test
 .venv-test/bin/python -m pytest tests/ -q
 ```
 
-202 tests (199 pass, 3 skip by design), about 3 minutes. These are **integration tests against a real
+260 tests (257 pass, 3 skip by design), about 4 minutes. These are **integration tests against a real
 container** — there are no mocked-browser unit tests, because the thing worth
 proving is that a real Chromium page survives real tool calls.
 
