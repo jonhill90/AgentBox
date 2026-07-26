@@ -57,6 +57,7 @@ Configuration lives in `.env` and is read by `docker-compose.yml`:
 | `LOG_LEVEL` | `info` | Server log level |
 | `AGENTBOX_ENABLE_JUMPBOX_TOOLS` | `true` | Register the filesystem/git/http tools (see below) |
 | `AGENTBOX_AUTH_TOKEN` | *(empty)* | Shared secret. Empty = no auth (see below) |
+| `AGENTBOX_ENABLE_TERMINAL` | `false` | Register the PTY WebSocket (see below) |
 
 The compose file defines one service, no external network, and two named volumes:
 `agentbox-workspace` → `/workspace` and `agentbox-screenshots` →
@@ -190,6 +191,49 @@ WebSocket will check the same secret as a `?token=` param when it exists.
 
 The comparison is constant-time (`secrets.compare_digest`).
 
+## Terminal
+
+A real PTY over a WebSocket at `/terminal`, with an xterm.js panel in `/ui`.
+Ported from hill90-app's `ws_terminal.py`.
+
+**Off by default, and gated twice.** This is the only toggle here that defaults
+to `false` — everything else is a structured tool; this one is a shell.
+
+1. `AGENTBOX_ENABLE_TERMINAL=true`, or the WebSocket route is never registered
+   and there is nothing to connect to.
+2. `AGENTBOX_AUTH_TOKEN` must be set, and the socket must supply it as
+   `?token=<token>`. This is **fail closed**: unlike the HTTP surface, where no
+   token means no auth, a terminal with no token configured refuses *every*
+   connection. Hill90 never exposes this socket unauthenticated even to itself.
+
+```bash
+AGENTBOX_ENABLE_TERMINAL=true AGENTBOX_AUTH_TOKEN=some-secret docker compose up -d
+# then open /ui and click Terminal
+```
+
+Wire format: binary frames are raw terminal I/O, text frames are JSON control
+messages (`{"type":"resize","cols":N,"rows":N}`). Unknown control frames are
+ignored rather than rejected. The shell is `tmux new-session -A` where
+available, so a dropped socket reattaches instead of losing the session.
+
+The panel is Observing by default; **Take Control** enables stdin, matching the
+browser view's model. An auth refusal arrives as an HTTP 403 handshake rejection
+rather than close code 4001 — the server rejects *before* accepting, so no
+socket is ever opened — and the client treats that as "do not retry".
+
+The shell's environment is built explicitly rather than inherited, so a terminal
+session cannot read `AGENTBOX_AUTH_TOKEN` out of the server process.
+
+> **Known limitation: this is a root shell.** The container runs as root, where
+> Hill90's equivalent drops to a dedicated `agentuser`. Fixing it touches
+> `/workspace` ownership, the Playwright browser cache and the screenshots
+> volume, so it is deliberately its own change (SPEC §15.6). Until then, the two
+> gates above are what stands in front of it — which is why the toggle defaults
+> off and the auth is fail-closed.
+
+xterm.js is **vendored** into `src/vendor/`, not loaded from a CDN, so `/ui`
+keeps working with no outbound network and no build step.
+
 ## Take-control viewer (`/ui`)
 
 Open <http://localhost:8054/ui>. It is one static HTML page with inline JS — no
@@ -272,7 +316,7 @@ merely postponed.
 
 ```bash
 python3 -m venv .venv-test
-.venv-test/bin/pip install pytest pytest-asyncio 'mcp>=1.2.0' httpx
+.venv-test/bin/pip install pytest pytest-asyncio 'mcp>=1.2.0' httpx websockets
 .venv-test/bin/python -m pytest tests/ -v
 ```
 
@@ -314,6 +358,12 @@ Chromium page survives real tool calls.
 - `tests/test_ssrf_redirects.py` — the redirect hops specifically, against a
   throwaway loopback redirect server. Deterministic and offline: no container
   and no network needed.
+- `tests/test_terminal.py` — three containers (toggle off, on without a token,
+  on with one): route absence, fail-closed refusal, wrong/missing token, an echo
+  round-trip through the real PTY, `pwd` landing in `/workspace`, resize moving
+  the child's terminal size, tolerance of unknown control frames, the auth token
+  not leaking into the shell, and no shell processes leaking across sessions.
+  Needs `pip install websockets`.
 - `tests/test_auth.py` — auth off by default, and with a second container
   running `AGENTBOX_AUTH_TOKEN`: every `/api/*` route and MCP tool refused
   without a token, refused with a wrong one, refused with a raw token lacking
@@ -333,6 +383,8 @@ python:3.12-slim-bookworm
 ├── Python deps (fastmcp, pydantic, uvicorn, playwright)
 └── src/
     ├── auth.py           (Bearer token check — SPEC §12)
+    ├── terminal.py       (PTY WebSocket relay — SPEC §15)
+    ├── vendor/           (xterm.js, vendored — see its README)
     ├── mcp_server.py
     │   ├── persistent browser loop (daemon thread, owns the Page)
     │   ├── FastMCP streamable-http on :8000 → :8054

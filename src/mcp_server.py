@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse
 
 import auth
 
@@ -416,6 +416,26 @@ def _rest_result(result: dict) -> JSONResponse:
     return JSONResponse(result)
 
 
+VENDOR_DIR = Path(__file__).resolve().parent / "vendor"
+VENDOR_TYPES = {".js": "text/javascript", ".css": "text/css"}
+
+
+@mcp.custom_route("/vendor/{name}", methods=["GET"])
+async def vendor_asset(request):
+    """Serve the vendored xterm.js assets for the terminal panel.
+
+    Unauthenticated, like /ui itself: the page needs its scripts before
+    it can prompt for a token. Only files that actually sit in src/vendor
+    are served, and the name is reduced to a basename first, so a
+    traversal like ../../etc/passwd cannot escape.
+    """
+    name = os.path.basename(request.path_params["name"])
+    target = VENDOR_DIR / name
+    if target.suffix not in VENDOR_TYPES or not target.is_file():
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    return FileResponse(target, media_type=VENDOR_TYPES[target.suffix])
+
+
 @mcp.custom_route("/ui", methods=["GET"])
 async def ui_page(request):
     """Serve the single-page take-control viewer."""
@@ -434,7 +454,14 @@ async def api_auth_required(request):
     it can know to prompt, and the answer reveals nothing a 401 would
     not already have told the caller.
     """
-    return JSONResponse({"auth_required": auth.auth_enabled()})
+    return JSONResponse({
+        "auth_required": auth.auth_enabled(),
+        # Capability probe for the viewer: whether to offer the terminal
+        # panel at all. Piggy-backs on this endpoint rather than adding a
+        # second unauthenticated one; both answers are things a caller
+        # would learn anyway from a 401 or a failed upgrade.
+        "terminal_enabled": TERMINAL_ENABLED,
+    })
 
 
 @_api_route("/api/screenshot", methods=["GET"])

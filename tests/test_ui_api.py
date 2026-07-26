@@ -290,3 +290,45 @@ async def test_ui_page_wires_up_describe_mode():
     # Describe is only offered while Take Control is on (Hill90's behaviour).
     assert 'els.describe.classList.toggle("shown", on)' in html
     assert "if (!on) setDescribe(false)" in html
+
+
+# ── terminal panel assets and capability probe (SPEC §15.5) ──────────
+
+async def test_capability_probe_reports_terminal_state():
+    """The viewer only offers the terminal button when the server has it on."""
+    status, body = await rest_get("/api/auth-required")
+    assert status == 200, body
+    assert "terminal_enabled" in body, body
+    assert body["terminal_enabled"] is False, (
+        "the default container has the terminal on — it must default off"
+    )
+
+
+async def test_vendored_xterm_assets_are_served():
+    """Vendored, not CDN: /ui must work with no outbound network."""
+    for name, ctype, min_size in [
+        ("xterm.js", "javascript", 100_000),
+        ("xterm.css", "css", 1_000),
+        ("xterm-addon-fit.js", "javascript", 500),
+    ]:
+        status, body = await rest_get(f"/vendor/{name}")
+        assert status == 200, f"/vendor/{name} -> {status}"
+        assert len(body) > min_size, f"/vendor/{name} is only {len(body)} bytes"
+
+
+async def test_vendor_route_rejects_unknown_and_traversal():
+    for path in ["/vendor/nope.js", "/vendor/..%2f..%2fetc%2fpasswd",
+                 "/vendor/mcp_server.py", "/vendor/xterm.js.map"]:
+        status, _body = await rest_get(path)
+        assert status == 404, f"{path} -> {status}"
+
+
+async def test_ui_page_wires_up_the_terminal_panel():
+    status, html = await rest_get("/ui")
+    assert status == 200
+    for marker in ['id="termpanel"', 'id="termbtn"', "/vendor/xterm.js",
+                   "/vendor/xterm.css", "new Terminal(", "FitAddon.FitAddon",
+                   '"resize"', "termWsUrl"]:
+        assert marker in html, f"UI page is missing {marker}"
+    # The terminal button is only revealed when the server reports it on.
+    assert 'termEls.btn.classList.toggle("shown", termEnabled)' in html

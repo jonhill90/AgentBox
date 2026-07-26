@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AgentBox — Browser Viewer</title>
+<link rel="stylesheet" href="/vendor/xterm.css">
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/xterm-addon-fit.js"></script>
 <style>
   :root {
     --bg: #0b1120; --panel: #111a2e; --border: #1e2b45; --text: #e6edf7;
@@ -75,6 +78,19 @@
     background: var(--panel); border-top: 1px solid var(--border); font-size: 11.5px;
   }
   #status.err { color: #f87171; }
+  /* ── terminal panel (SPEC §15.5) ── */
+  #termpanel { display: none; flex: 0 0 40%; min-height: 0; flex-direction: column;
+    border-top: 1px solid var(--border); background: #1a1b26; }
+  #termpanel.open { display: flex; }
+  #termbar { display: flex; align-items: center; gap: 8px; padding: 5px 10px;
+    background: var(--panel); border-bottom: 1px solid var(--border); font-size: 11.5px; }
+  #termbar .grow { flex: 1; }
+  #termstate { color: var(--muted); }
+  #termctl.on { background: #f7768e; border-color: #f7768e; color: #1a1b26; }
+  #termhost { flex: 1; min-height: 0; padding: 4px; overflow: hidden; }
+  #termbtn { display: none; }
+  #termbtn.shown { display: inline-block; }
+  #termbtn.on { background: #9ece6a; border-color: #9ece6a; color: #14210a; }
   #hint { margin-left: auto; }
 </style>
 </head>
@@ -85,6 +101,7 @@
   <button class="nav" id="forward" title="Forward">&#8594;</button>
   <button class="nav" id="reload" title="Reload">&#8635;</button>
   <input id="url" type="text" placeholder="Enter URL and press Enter..." spellcheck="false" autocomplete="off">
+  <button id="termbtn" title="Show or hide the terminal panel">Terminal</button>
   <button id="describe" title="When on, clicking an element describes it instead of clicking the page">Describe</button>
   <button id="control" title="When on, clicks / scrolls / keystrokes go to the real page">Take Control</button>
 </header>
@@ -98,6 +115,16 @@
     <p>The page starts on the first tool call or navigation.</p>
     <p>Type a URL above, or have an agent call <code>navigate</code> over MCP.</p>
   </div>
+</div>
+
+<div id="termpanel">
+  <div id="termbar">
+    <strong>Terminal</strong>
+    <span id="termstate">Disconnected</span>
+    <span class="grow"></span>
+    <button id="termctl" title="When on, keystrokes go to the shell">Take Control</button>
+  </div>
+  <div id="termhost"></div>
 </div>
 
 <footer>
@@ -146,6 +173,7 @@ function setStatus(text, isError) {
 // so a wrong paste is recoverable without a reload.
 const TOKEN_KEY = "agentbox-token";
 let authRequired = false;
+let termEnabled = false;
 
 function storedToken() {
   return sessionStorage.getItem(TOKEN_KEY) || "";
@@ -161,9 +189,12 @@ function promptForToken(message) {
 async function initAuth() {
   try {
     const res = await fetch("/api/auth-required", { cache: "no-store" });
-    authRequired = res.ok && (await res.json()).auth_required === true;
+    const info = res.ok ? await res.json() : {};
+    authRequired = info.auth_required === true;
+    termEnabled = info.terminal_enabled === true;
   } catch {
     authRequired = false;
+    termEnabled = false;
   }
   if (authRequired && !storedToken()) {
     promptForToken("This AgentBox requires an auth token (AGENTBOX_AUTH_TOKEN):");
@@ -389,9 +420,147 @@ els.stage.addEventListener("keydown", async (e) => {
   }
 });
 
+// ── terminal panel (SPEC §15.5) ─────────────────────────────────────
+// Mirrors XTerminal.tsx's model without React: Observing by default,
+// Take Control enables stdin. Binary frames carry terminal I/O, JSON
+// text frames carry control.
+const TERM_PING_MS = 30000;
+const TERM_MAX_RECONNECTS = 5;
+
+const term = {
+  enabled: false, open: false, controlling: false, openedOnce: false,
+  xterm: null, fit: null, ws: null, ping: null, reconnects: 0, dataSub: null,
+};
+
+const termEls = {
+  panel: document.getElementById("termpanel"),
+  host: document.getElementById("termhost"),
+  btn: document.getElementById("termbtn"),
+  ctl: document.getElementById("termctl"),
+  state: document.getElementById("termstate"),
+};
+
+function setTermState(text) { termEls.state.textContent = text; }
+
+function termWsUrl() {
+  const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+  const token = storedToken();
+  return `${scheme}//${location.host}/terminal` + (token ? `?token=${encodeURIComponent(token)}` : "");
+}
+
+function sendTermResize() {
+  if (!term.fit || !term.ws || term.ws.readyState !== WebSocket.OPEN) return;
+  const dims = term.fit.proposeDimensions();
+  if (dims && dims.cols && dims.rows) {
+    term.ws.send(JSON.stringify({ type: "resize", cols: dims.cols, rows: dims.rows }));
+  }
+}
+
+function connectTerm() {
+  if (!term.xterm) {
+    term.xterm = new Terminal({
+      cursorBlink: true, disableStdin: true, fontSize: 13, scrollback: 5000,
+      convertEol: true, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+      theme: { background: "#1a1b26", foreground: "#a9b1d6", cursor: "#c0caf5" },
+    });
+    term.fit = new FitAddon.FitAddon();
+    term.xterm.loadAddon(term.fit);
+    term.xterm.open(termEls.host);
+    new ResizeObserver(() => { try { term.fit.fit(); sendTermResize(); } catch {} })
+      .observe(termEls.host);
+  }
+  try { term.fit.fit(); } catch {}
+
+  const ws = new WebSocket(termWsUrl());
+  ws.binaryType = "arraybuffer";
+  term.ws = ws;
+  term.openedOnce = false;
+  setTermState("Connecting…");
+
+  ws.onopen = () => {
+    term.reconnects = 0;
+    term.openedOnce = true;
+    setTermState(term.controlling ? "Controlling" : "Observing");
+    sendTermResize();
+    if (term.ping) clearInterval(term.ping);
+    term.ping = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "ping" }));
+    }, TERM_PING_MS);
+  };
+
+  ws.onmessage = (event) => {
+    term.xterm.write(event.data instanceof ArrayBuffer
+      ? new Uint8Array(event.data) : event.data);
+  };
+
+  ws.onclose = (event) => {
+    if (term.ping) { clearInterval(term.ping); term.ping = null; }
+    setTermControl(false);
+    setTermState("Disconnected");
+
+    // 1000 is a clean close. An auth refusal arrives as a FAILED HANDSHAKE
+    // (HTTP 403), not close code 4001 — the server rejects before accept,
+    // so onclose fires with 1006 and wasClean false. Retrying that just
+    // spins, so treat a never-opened socket as terminal.
+    if (event.code === 1000 || event.code === 4001) return;
+    if (!term.openedOnce) {
+      term.xterm.write("\r\n\x1b[31mConnection refused — check AGENTBOX_AUTH_TOKEN " +
+                       "and that AGENTBOX_ENABLE_TERMINAL is on.\x1b[0m\r\n");
+      return;
+    }
+    if (term.open && term.reconnects < TERM_MAX_RECONNECTS) {
+      term.reconnects++;
+      setTimeout(() => { if (term.open) connectTerm(); },
+                 Math.min(2000 * term.reconnects, 10000));
+    }
+  };
+
+}
+
+function setTermControl(on) {
+  term.controlling = on && !!term.ws && term.ws.readyState === WebSocket.OPEN;
+  termEls.ctl.classList.toggle("on", term.controlling);
+  termEls.ctl.textContent = term.controlling ? "Release" : "Take Control";
+  if (!term.xterm) return;
+
+  term.xterm.options.disableStdin = !term.controlling;
+  if (term.controlling) {
+    term.xterm.focus();
+    if (!term.dataSub) {
+      term.dataSub = term.xterm.onData((data) => {
+        if (term.ws && term.ws.readyState === WebSocket.OPEN) {
+          term.ws.send(new TextEncoder().encode(data));
+        }
+      });
+    }
+    setTermState("Controlling");
+  } else {
+    if (term.dataSub) { term.dataSub.dispose(); term.dataSub = null; }
+    if (term.ws && term.ws.readyState === WebSocket.OPEN) setTermState("Observing");
+  }
+}
+
+function setTermOpen(on) {
+  term.open = on;
+  termEls.panel.classList.toggle("open", on);
+  termEls.btn.classList.toggle("on", on);
+  if (on) {
+    if (!term.ws || term.ws.readyState > WebSocket.OPEN) connectTerm();
+    setTimeout(() => { try { term.fit.fit(); sendTermResize(); } catch {} }, 50);
+  } else {
+    setTermControl(false);
+    if (term.ws) { term.ws.close(1000); term.ws = null; }
+  }
+}
+
+termEls.btn.addEventListener("click", () => setTermOpen(!term.open));
+termEls.ctl.addEventListener("click", () => setTermControl(!term.controlling));
+
 // ── poll ────────────────────────────────────────────────────────────
 setTakeControl(false);
 initAuth().then(() => {
+  // The terminal button only exists when the server has the toggle on.
+  termEls.btn.classList.toggle("shown", termEnabled);
   refresh();
   setInterval(refresh, POLL_MS);
 });
