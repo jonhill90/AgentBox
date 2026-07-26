@@ -44,6 +44,8 @@ recorded in `docs/SECURITY.md`; several were bought with real bugs.
 6. **Filesystem tools stay inside `/workspace`**, enforced by realpath
    resolution in `PathPolicy`, default-deny.
 7. **AKM/knowledge tools are permanently out of scope.** Not deferred.
+8. **Secrets are read from files, never environment variables**, and never
+   logged — an env value is visible in `docker inspect`.
 
 ## Ground rules for changing this repo
 

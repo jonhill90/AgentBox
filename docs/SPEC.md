@@ -511,3 +511,43 @@ Mirror `XTerminal.tsx`'s model, not its React:
 registration and toggle), `src/ui.html` (panel), `theme/`,
 `docker-entrypoint.sh`. **Tested in** `tests/test_terminal.py`
 (20 tests) and `tests/test_ui_api.py`.
+
+## 16. Git push credentials (jumpbox tooling)
+
+Read access needed nothing: `git clone`/`pull` over HTTPS already worked.
+Push needs a credential, and a credential on this box can write to the
+operator's source of truth — so it is opt-in and deliberately narrow.
+
+- **Off by default.** With neither `AGENTBOX_GIT_CREDENTIALS_FILE` nor
+  `AGENTBOX_GIT_SSH_KEY_FILE` set, git behaves exactly as before and the
+  startup log says `Git push DISABLED`.
+- **Files, not environment.** Both variables name a path. An environment
+  value is returned verbatim by `docker inspect` — this repo's own audit
+  demonstrated that leak for the auth token. Pair with Compose `secrets:`.
+- **A read-only credential helper.** Git's built-in `store` helper also
+  implements `store` and `erase`, so anything in the container could rewrite
+  or delete the operator's secret through git. `agentbox-git-credential`
+  answers `get` only, matches on protocol+host, and never opens the file for
+  writing.
+- **SSH keeps `StrictHostKeyChecking=yes`** and requires a `known_hosts`
+  file. Turning it off is the usual shortcut and it converts a push
+  credential into a machine-in-the-middle opportunity. With no host keys a
+  push refuses to connect — the safe failure.
+- **Scope belongs to the credential.** Use a fine-grained PAT limited to the
+  repositories that need writing, or a per-repository deploy key. Nothing in
+  this container can narrow a broad token.
+
+Not solved, and inherent: with the terminal enabled the shell runs as the
+same uid as the server, so it can read the credential file directly. Any
+process that can run `git` can obtain the secret. The mitigations are the
+scope of the credential and the terminal being off by default.
+
+## 17. Jumpbox tooling
+
+`openssh-client`, `less`, `procps`, `jq`, `vim`, `wget`, `unzip`, `ripgrep`,
+`ca-certificates`, `iputils-ping`, `dnsutils`, `netcat-openbsd`, `rsync`.
+
+Three of those are correctness rather than convenience: git pages through
+`less`, an agent with no `ps` cannot see its own processes (`docker top` from
+outside was the workaround), and a jumpbox that cannot `ssh` is a strange
+jumpbox.

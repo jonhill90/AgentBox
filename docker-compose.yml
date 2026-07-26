@@ -42,6 +42,12 @@ services:
       # AGENTBOX_AUTH_TOKEN as well: the WebSocket is fail-closed and
       # refuses every connection with 4001 when no token is configured.
       - AGENTBOX_ENABLE_TERMINAL=${AGENTBOX_ENABLE_TERMINAL:-false}
+      # Git push (SPEC §16). Unset = clone/pull only, no push. Point these
+      # at FILES (ideally Compose secrets), never at the secret itself —
+      # environment values are visible in `docker inspect`.
+      - AGENTBOX_GIT_CREDENTIALS_FILE=${AGENTBOX_GIT_CREDENTIALS_FILE:-}
+      - AGENTBOX_GIT_SSH_KEY_FILE=${AGENTBOX_GIT_SSH_KEY_FILE:-}
+      - AGENTBOX_GIT_KNOWN_HOSTS_FILE=${AGENTBOX_GIT_KNOWN_HOSTS_FILE:-}
 
     # The entrypoint needs these as root to fix volume ownership and then
     # drop privileges; everything else is dropped. no-new-privileges is

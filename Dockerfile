@@ -41,6 +41,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
+# Jumpbox tooling. `less`, `procps` and `openssh-client` are correctness
+# gaps rather than conveniences: git pages through less, an agent that
+# cannot run `ps` cannot see its own processes (we had to use `docker top`
+# from outside all along), and a jumpbox that cannot ssh is a strange
+# jumpbox. The rest is the ordinary kit an agent reaches for.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openssh-client \
+    less \
+    procps \
+    jq \
+    vim \
+    wget \
+    unzip \
+    ripgrep \
+    ca-certificates \
+    iputils-ping \
+    dnsutils \
+    netcat-openbsd \
+    rsync \
+    && rm -rf /var/lib/apt/lists/*
+
 # tmux and zsh back the terminal (SPEC §15). tmux matters beyond taste:
 # `new-session -A` reattaches, so a dropped WebSocket resumes the session
 # instead of losing it. Installed unconditionally; the terminal route is
@@ -126,7 +147,8 @@ ENV HOME=/home/agentbox
 ENV USER=agentbox
 
 COPY docker-entrypoint.sh /usr/local/bin/agentbox-entrypoint
-RUN chmod +x /usr/local/bin/agentbox-entrypoint
+COPY git-credential-helper.sh /usr/local/bin/agentbox-git-credential
+RUN chmod +x /usr/local/bin/agentbox-entrypoint /usr/local/bin/agentbox-git-credential
 
 # CRITICAL: Unbuffered output for streaming
 ENV PYTHONUNBUFFERED=1

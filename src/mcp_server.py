@@ -1044,6 +1044,9 @@ else:
 if __name__ == "__main__":
     logger.info("Starting AgentBox MCP server...")
     auth.log_startup_state()
+
+    import git_credentials
+    git_credentials.configure()
     logger.info("   Mode: Streamable HTTP")
     logger.info("   URL: http://0.0.0.0:8000/mcp")
 

@@ -182,6 +182,19 @@ and re-verified against the original reproduction:
   writes were dropped. A timed-out browser dispatch left its coroutine
   running.
 
+## Git push credentials
+
+Off unless a credential file is configured; read access never needed one.
+The secret is read from a **file** so it stays out of `docker inspect`, the
+credential helper is **read-only** so nothing in the container can rewrite
+it, and SSH keeps `StrictHostKeyChecking` on. Scope the credential itself —
+a fine-grained PAT limited to specific repositories, or a per-repo deploy
+key. See `SPEC.md` §16.
+
+**Inherent limitation:** with the terminal on, the shell shares the server's
+uid and can read the credential file. Any process that can run `git` can get
+the secret; that is what scoping the credential is for.
+
 ## Known limitation: the browser is a second egress path
 
 `http_request` is SSRF-filtered. **`navigate` and `evaluate` are not.** An
