@@ -50,6 +50,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zsh \
     && rm -rf /var/lib/apt/lists/*
 
+# tmux Tokyo Night theme (SPEC §15.5), matching hill90-app's agentbox and
+# Jon's dotfiles. The plugin is pinned to the same commit as both, so the
+# status bar here looks like the status bar there rather than drifting
+# with upstream.
+RUN git clone --depth=1 https://github.com/tmux-plugins/tpm /root/.tmux/plugins/tpm && \
+    git clone https://github.com/fabioluciano/tmux-tokyo-night /root/.tmux/plugins/tmux-tokyo-night && \
+    cd /root/.tmux/plugins/tmux-tokyo-night && git checkout -q fcfde9a
+COPY theme/tmux.conf /root/.tmux.conf
+# Pre-install plugins at build time so the first terminal session does not
+# pay for it (and works with no network at runtime).
+RUN tmux start-server && tmux new-session -d -s build-init && \
+    /root/.tmux/plugins/tpm/bin/install_plugins && \
+    tmux kill-server || true
+
 # Install Python dependencies
 COPY pyproject.toml ./
 RUN pip install --no-cache-dir -e .

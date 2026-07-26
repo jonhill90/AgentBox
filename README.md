@@ -216,8 +216,20 @@ messages (`{"type":"resize","cols":N,"rows":N}`). Unknown control frames are
 ignored rather than rejected. The shell is `tmux new-session -A` where
 available, so a dropped socket reattaches instead of losing the session.
 
-The panel is Observing by default; **Take Control** enables stdin, matching the
-browser view's model. An auth refusal arrives as an HTTP 403 handshake rejection
+`/ui` presents Browser and Terminal as **tabs**, each owning the full pane —
+the terminal does not squash the browser view. The terminal keeps its WebSocket
+open while you are on the Browser tab, so switching back does not drop the shell
+session. The tab is only shown when the server reports the toggle on.
+
+The terminal is Observing by default; **Take Control** enables stdin, matching
+the browser view's model.
+
+**Theme:** tmux runs `fabioluciano/tmux-tokyo-night` pinned to `fcfde9a` — the
+same commit and the same mods (night variation, transparent status bar, status
+at top, empty separators) as hill90-app's agentbox, so it looks like the
+terminal there. The powerline glyphs need a Nerd Font; rather than vendoring
+2.1 MB, `src/vendor/nerd-symbols.woff2` is a **944-byte subset** of just the six
+codepoints the theme actually draws. An auth refusal arrives as an HTTP 403 handshake rejection
 rather than close code 4001 — the server rejects *before* accepting, so no
 socket is ever opened — and the client treats that as "do not retry".
 

@@ -8,6 +8,15 @@
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/xterm-addon-fit.js"></script>
 <style>
+  /* Powerline/icon glyphs for the tmux Tokyo Night status bar. A 944-byte
+     subset of the Nerd Font symbols — see src/vendor/README.md. Listed
+     FIRST in the terminal's font stack so it wins for those codepoints
+     and the normal mono font handles everything else. */
+  @font-face {
+    font-family: "NerdSymbols";
+    src: url("/vendor/nerd-symbols.woff2") format("woff2");
+    font-display: block;
+  }
   :root {
     --bg: #0b1120; --panel: #111a2e; --border: #1e2b45; --text: #e6edf7;
     --muted: #8296b3; --accent: #d97706; --accent-dim: #78350f; --link: #38bdf8;
@@ -18,10 +27,38 @@
     background: var(--bg); color: var(--text);
     font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   }
+  /* Tab strip. Views are full-height and mutually exclusive — the
+     terminal used to take a fixed 40% and squash the browser. */
+  #tabs {
+    display: flex; align-items: stretch; gap: 2px; padding: 6px 10px 0;
+    background: var(--panel); border-bottom: 1px solid var(--border); flex: 0 0 auto;
+  }
+  .tab {
+    display: flex; align-items: center; gap: 7px;
+    padding: 7px 15px; border: 1px solid transparent; border-bottom: none;
+    border-radius: 7px 7px 0 0; margin-bottom: -1px;
+    color: var(--muted); background: transparent; cursor: pointer;
+    font: inherit; font-weight: 500;
+  }
+  .tab:hover { color: var(--text); background: #16203a; }
+  .tab.active {
+    color: var(--text); background: var(--bg);
+    border-color: var(--border); border-bottom: 1px solid var(--bg);
+  }
+  .tab .dot {
+    width: 7px; height: 7px; border-radius: 50%; background: #3d4a66; flex: 0 0 auto;
+  }
+  .tab .dot.live { background: #9ece6a; }
+  .tab .dot.busy { background: var(--accent); }
+  #tabspacer { flex: 1; }
+  #tabmeta { display: flex; align-items: center; color: var(--muted); font-size: 11.5px; padding-right: 4px; }
   header {
     display: flex; align-items: center; gap: 6px; padding: 8px 10px;
     background: var(--panel); border-bottom: 1px solid var(--border); flex: 0 0 auto;
   }
+  header[hidden] { display: none; }
+  .view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .view[hidden] { display: none; }
   button {
     font: inherit; color: var(--muted); background: transparent;
     border: 1px solid var(--border); border-radius: 5px; padding: 4px 9px; cursor: pointer;
@@ -78,30 +115,44 @@
     background: var(--panel); border-top: 1px solid var(--border); font-size: 11.5px;
   }
   #status.err { color: #f87171; }
-  /* ── terminal panel (SPEC §15.5) ── */
-  #termpanel { display: none; flex: 0 0 40%; min-height: 0; flex-direction: column;
-    border-top: 1px solid var(--border); background: #1a1b26; }
-  #termpanel.open { display: flex; }
-  #termbar { display: flex; align-items: center; gap: 8px; padding: 5px 10px;
-    background: var(--panel); border-bottom: 1px solid var(--border); font-size: 11.5px; }
+  /* ── terminal view (SPEC §15.5) ── */
+  #termview { background: #1a1b26; }
+  #termbar { display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+    background: var(--panel); border-bottom: 1px solid var(--border); font-size: 11.5px;
+    flex: 0 0 auto; }
   #termbar .grow { flex: 1; }
   #termstate { color: var(--muted); }
   #termctl.on { background: #f7768e; border-color: #f7768e; color: #1a1b26; }
-  #termhost { flex: 1; min-height: 0; padding: 4px; overflow: hidden; }
-  #termbtn { display: none; }
-  #termbtn.shown { display: inline-block; }
-  #termbtn.on { background: #9ece6a; border-color: #9ece6a; color: #14210a; }
+  #termhost { flex: 1; min-height: 0; padding: 6px 8px; overflow: hidden; }
+  #tab-terminal[hidden] { display: none; }
+  /* xterm ships a default (light) scrollbar that looks wrong on a dark
+     terminal — it rendered as a white strip down the right edge. */
+  .xterm-viewport { scrollbar-width: thin; scrollbar-color: #292e42 #1a1b26; }
+  .xterm-viewport::-webkit-scrollbar { width: 10px; }
+  .xterm-viewport::-webkit-scrollbar-track { background: #1a1b26; }
+  .xterm-viewport::-webkit-scrollbar-thumb { background: #292e42; border-radius: 5px; }
+  .xterm-viewport::-webkit-scrollbar-thumb:hover { background: #3d4a66; }
+  /* Footer swaps content with the tab, so it never describes the view
+     you are not looking at. */
+  .browser-only[hidden], .terminal-only[hidden] { display: none; }
   #hint { margin-left: auto; }
 </style>
 </head>
 <body>
 
+<nav id="tabs">
+  <button class="tab active" id="tab-browser"><span class="dot" id="dot-browser"></span>Browser</button>
+  <button class="tab" id="tab-terminal" hidden><span class="dot" id="dot-terminal"></span>Terminal</button>
+  <span id="tabspacer"></span>
+  <span id="tabmeta"></span>
+</nav>
+
+<div class="view" id="view-browser">
 <header>
   <button class="nav" id="back" title="Back">&#8592;</button>
   <button class="nav" id="forward" title="Forward">&#8594;</button>
   <button class="nav" id="reload" title="Reload">&#8635;</button>
   <input id="url" type="text" placeholder="Enter URL and press Enter..." spellcheck="false" autocomplete="off">
-  <button id="termbtn" title="Show or hide the terminal panel">Terminal</button>
   <button id="describe" title="When on, clicking an element describes it instead of clicking the page">Describe</button>
   <button id="control" title="When on, clicks / scrolls / keystrokes go to the real page">Take Control</button>
 </header>
@@ -116,10 +167,10 @@
     <p>Type a URL above, or have an agent call <code>navigate</code> over MCP.</p>
   </div>
 </div>
+</div><!-- /view-browser -->
 
-<div id="termpanel">
+<div class="view" id="termview" hidden>
   <div id="termbar">
-    <strong>Terminal</strong>
     <span id="termstate">Disconnected</span>
     <span class="grow"></span>
     <button id="termctl" title="When on, keystrokes go to the shell">Take Control</button>
@@ -128,9 +179,13 @@
 </div>
 
 <footer>
-  <span id="status">Connecting&hellip;</span>
-  <span id="current"></span>
-  <span id="hint">Take Control off &mdash; view only</span>
+  <span id="status" class="browser-only">Connecting&hellip;</span>
+  <span id="current" class="browser-only"></span>
+  <span id="hint" class="browser-only">Take Control off &mdash; view only</span>
+  <span id="termfoot" class="terminal-only" hidden>Shell in /workspace</span>
+  <span id="termhint" class="terminal-only" hidden style="margin-left:auto">
+    Take Control off &mdash; read only
+  </span>
 </footer>
 
 <script>
@@ -241,6 +296,7 @@ async function refresh() {
       els.frame.hidden = true;
       els.placeholder.hidden = false;
       setStatus("Browser not active");
+      tabEls.browserDot.classList.remove("live");
       els.current.textContent = "";
       return;
     }
@@ -256,6 +312,7 @@ async function refresh() {
     // Don't fight the operator while they're editing the URL bar.
     if (document.activeElement !== els.url) els.url.value = data.url || "";
     setStatus("Live · " + Math.round((data.bytes || 0) / 1024) + " KB");
+    tabEls.browserDot.classList.add("live");
   } catch (err) {
     setStatus("Failed to fetch screenshot", true);
   } finally {
@@ -433,14 +490,59 @@ const term = {
 };
 
 const termEls = {
-  panel: document.getElementById("termpanel"),
+  view: document.getElementById("termview"),
   host: document.getElementById("termhost"),
-  btn: document.getElementById("termbtn"),
   ctl: document.getElementById("termctl"),
   state: document.getElementById("termstate"),
+  dot: document.getElementById("dot-terminal"),
 };
 
-function setTermState(text) { termEls.state.textContent = text; }
+const tabEls = {
+  browser: document.getElementById("tab-browser"),
+  terminal: document.getElementById("tab-terminal"),
+  browserView: document.getElementById("view-browser"),
+  browserDot: document.getElementById("dot-browser"),
+  meta: document.getElementById("tabmeta"),
+};
+
+let activeTab = "browser";
+
+function setTermState(text, live) {
+  termEls.state.textContent = text;
+  termEls.dot.classList.toggle("live", live === true);
+  termEls.dot.classList.toggle("busy", live === "busy");
+}
+
+// ── tabs ────────────────────────────────────────────────────────────
+// Each view owns the full pane. The terminal keeps its WebSocket open
+// while the browser tab is showing, so switching back does not drop the
+// shell session.
+function activateTab(name) {
+  activeTab = name;
+  const isTerm = name === "terminal";
+
+  tabEls.browser.classList.toggle("active", !isTerm);
+  tabEls.terminal.classList.toggle("active", isTerm);
+  tabEls.browserView.hidden = isTerm;
+  termEls.view.hidden = !isTerm;
+
+  document.querySelectorAll(".browser-only").forEach((el) => { el.hidden = isTerm; });
+  document.querySelectorAll(".terminal-only").forEach((el) => { el.hidden = !isTerm; });
+
+  if (isTerm) {
+    setTakeControl(false);          // browser input off while it is hidden
+    if (!term.ws || term.ws.readyState > WebSocket.OPEN) connectTerm();
+    // Fit after the pane is actually laid out, or xterm measures zero.
+    requestAnimationFrame(() => {
+      try { term.fit.fit(); sendTermResize(); term.xterm.focus(); } catch {}
+    });
+  } else {
+    setTermControl(false);          // shell input off while it is hidden
+  }
+}
+
+tabEls.browser.addEventListener("click", () => activateTab("browser"));
+tabEls.terminal.addEventListener("click", () => activateTab("terminal"));
 
 function termWsUrl() {
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
@@ -460,7 +562,7 @@ function connectTerm() {
   if (!term.xterm) {
     term.xterm = new Terminal({
       cursorBlink: true, disableStdin: true, fontSize: 13, scrollback: 5000,
-      convertEol: true, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+      convertEol: true, fontFamily: "NerdSymbols, ui-monospace, SFMono-Regular, Menlo, monospace",
       theme: { background: "#1a1b26", foreground: "#a9b1d6", cursor: "#c0caf5" },
     });
     term.fit = new FitAddon.FitAddon();
@@ -475,12 +577,12 @@ function connectTerm() {
   ws.binaryType = "arraybuffer";
   term.ws = ws;
   term.openedOnce = false;
-  setTermState("Connecting…");
+  setTermState("Connecting…", "busy");
 
   ws.onopen = () => {
     term.reconnects = 0;
     term.openedOnce = true;
-    setTermState(term.controlling ? "Controlling" : "Observing");
+    setTermState(term.controlling ? "Controlling" : "Observing", true);
     sendTermResize();
     if (term.ping) clearInterval(term.ping);
     term.ping = setInterval(() => {
@@ -496,7 +598,7 @@ function connectTerm() {
   ws.onclose = (event) => {
     if (term.ping) { clearInterval(term.ping); term.ping = null; }
     setTermControl(false);
-    setTermState("Disconnected");
+    setTermState("Disconnected", false);
 
     // 1000 is a clean close. An auth refusal arrives as a FAILED HANDSHAKE
     // (HTTP 403), not close code 4001 — the server rejects before accept,
@@ -508,9 +610,9 @@ function connectTerm() {
                        "and that AGENTBOX_ENABLE_TERMINAL is on.\x1b[0m\r\n");
       return;
     }
-    if (term.open && term.reconnects < TERM_MAX_RECONNECTS) {
+    if (term.reconnects < TERM_MAX_RECONNECTS) {
       term.reconnects++;
-      setTimeout(() => { if (term.open) connectTerm(); },
+      setTimeout(() => connectTerm(),
                  Math.min(2000 * term.reconnects, 10000));
     }
   };
@@ -521,6 +623,9 @@ function setTermControl(on) {
   term.controlling = on && !!term.ws && term.ws.readyState === WebSocket.OPEN;
   termEls.ctl.classList.toggle("on", term.controlling);
   termEls.ctl.textContent = term.controlling ? "Release" : "Take Control";
+  document.getElementById("termhint").textContent = term.controlling
+    ? "Keystrokes go to the shell"
+    : "Take Control off — read only";
   if (!term.xterm) return;
 
   term.xterm.options.disableStdin = !term.controlling;
@@ -533,34 +638,21 @@ function setTermControl(on) {
         }
       });
     }
-    setTermState("Controlling");
+    setTermState("Controlling", true);
   } else {
     if (term.dataSub) { term.dataSub.dispose(); term.dataSub = null; }
-    if (term.ws && term.ws.readyState === WebSocket.OPEN) setTermState("Observing");
+    if (term.ws && term.ws.readyState === WebSocket.OPEN) setTermState("Observing", true);
   }
 }
 
-function setTermOpen(on) {
-  term.open = on;
-  termEls.panel.classList.toggle("open", on);
-  termEls.btn.classList.toggle("on", on);
-  if (on) {
-    if (!term.ws || term.ws.readyState > WebSocket.OPEN) connectTerm();
-    setTimeout(() => { try { term.fit.fit(); sendTermResize(); } catch {} }, 50);
-  } else {
-    setTermControl(false);
-    if (term.ws) { term.ws.close(1000); term.ws = null; }
-  }
-}
-
-termEls.btn.addEventListener("click", () => setTermOpen(!term.open));
 termEls.ctl.addEventListener("click", () => setTermControl(!term.controlling));
 
 // ── poll ────────────────────────────────────────────────────────────
 setTakeControl(false);
 initAuth().then(() => {
-  // The terminal button only exists when the server has the toggle on.
-  termEls.btn.classList.toggle("shown", termEnabled);
+  // The terminal tab only appears when the server has the toggle on.
+  tabEls.terminal.hidden = !termEnabled;
+  if (authRequired) tabEls.meta.textContent = "🔒 authenticated";
   refresh();
   setInterval(refresh, POLL_MS);
 });

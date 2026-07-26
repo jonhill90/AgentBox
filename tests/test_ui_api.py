@@ -323,12 +323,44 @@ async def test_vendor_route_rejects_unknown_and_traversal():
         assert status == 404, f"{path} -> {status}"
 
 
-async def test_ui_page_wires_up_the_terminal_panel():
+async def test_ui_page_wires_up_the_terminal_view():
     status, html = await rest_get("/ui")
     assert status == 200
-    for marker in ['id="termpanel"', 'id="termbtn"', "/vendor/xterm.js",
-                   "/vendor/xterm.css", "new Terminal(", "FitAddon.FitAddon",
-                   '"resize"', "termWsUrl"]:
+    for marker in ['id="termview"', 'id="tab-terminal"', "/vendor/xterm.js",
+                   "/vendor/xterm.css", "/vendor/nerd-symbols.woff2",
+                   "new Terminal(", "FitAddon.FitAddon", '"resize"', "termWsUrl"]:
         assert marker in html, f"UI page is missing {marker}"
-    # The terminal button is only revealed when the server reports it on.
-    assert 'termEls.btn.classList.toggle("shown", termEnabled)' in html
+    # The terminal tab only appears when the server reports it on.
+    assert "tabEls.terminal.hidden = !termEnabled" in html
+
+
+async def test_ui_uses_tabs_rather_than_a_split_pane():
+    """Each view owns the full pane; the terminal must not squash the browser."""
+    status, html = await rest_get("/ui")
+    assert 'id="tabs"' in html and 'id="view-browser"' in html
+    assert "function activateTab" in html
+    # The old fixed-height split is gone.
+    assert "flex: 0 0 40%" not in html, "terminal is still taking a fixed slice"
+    assert 'id="termpanel"' not in html, "old split-panel markup left behind"
+
+
+async def test_terminal_font_subset_is_served():
+    """The tmux Tokyo Night status bar needs Nerd Font glyphs or it shows tofu.
+
+    Fetched as bytes, not through rest_get: woff2 is binary and does not
+    survive a text decode.
+    """
+    import asyncio
+    import urllib.request
+
+    from conftest import BASE_URL
+
+    def _fetch():
+        with urllib.request.urlopen(f"{BASE_URL}/vendor/nerd-symbols.woff2", timeout=30) as r:
+            return r.status, r.read(), r.headers.get("Content-Type", "")
+
+    status, body, ctype = await asyncio.to_thread(_fetch)
+    assert status == 200, status
+    assert ctype == "font/woff2", ctype
+    assert body[:4] == b"wOF2", "not a woff2 file"
+    assert 500 < len(body) < 50_000, f"unexpected font size: {len(body)}"
