@@ -81,10 +81,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN git clone --depth=1 https://github.com/tmux-plugins/tpm /home/agentbox/.tmux/plugins/tpm && \
     git clone https://github.com/fabioluciano/tmux-tokyo-night /home/agentbox/.tmux/plugins/tmux-tokyo-night && \
     cd /home/agentbox/.tmux/plugins/tmux-tokyo-night && git checkout -q fcfde9a
+# Powerlevel10k, system-wide, plus oh-my-zsh for the app user — the same
+# prompt as the operator's dotfiles (os_icon, dir, vcs, prompt_char).
+#
+# gitstatusd is pre-fetched at build time. hill90-app dropped the `vcs`
+# segment because the daemon was not bundled, which loses the git branch
+# and status icons; fetching it here keeps them. Without the daemon p10k
+# would try to download it on first prompt, at runtime, with no network.
+RUN git clone --depth=1 https://github.com/romkatv/powerlevel10k.git /usr/share/powerlevel10k && \
+    su agentbox -s /bin/sh -c '/usr/share/powerlevel10k/gitstatus/install -f' && \
+    su agentbox -s /bin/sh -c 'sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended'
+
 COPY theme/tmux.conf /home/agentbox/.tmux.conf
 # A .zshrc must exist or zsh runs its first-run setup wizard, which eats
 # the opening keystrokes of every new terminal session.
 COPY theme/zshrc /home/agentbox/.zshrc
+COPY theme/p10k.zsh /home/agentbox/.p10k.zsh
 RUN chown -R agentbox:agentbox /home/agentbox
 # Pre-install plugins at build time so the first terminal session does not
 # pay for it (and works with no network at runtime).

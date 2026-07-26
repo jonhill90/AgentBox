@@ -463,3 +463,60 @@ async def test_unauthenticated_socket_times_out(servers):
             # AUTH_TIMEOUT is 10s server-side; wait past it.
             await asyncio.wait_for(ws.recv(), timeout=20)
     assert ws.close_code == 4001, ws.close_code
+
+
+# ── prompt (Powerlevel10k) ───────────────────────────────────────────
+
+@requires_docker_introspection
+async def test_prompt_is_powerlevel10k_with_os_and_git_segments(servers):
+    """The prompt must be the operator's real p10k, not an approximation.
+
+    hill90-app dropped the `vcs` segment because gitstatusd was not
+    bundled, which loses the git branch and status icons. The daemon is
+    pre-fetched at build time here so the segment works.
+    """
+    async with _connect(servers["on"], TOKEN) as ws:
+        await _drain(ws, 3.0)
+        await ws.send(b"print -l -- $POWERLEVEL9K_LEFT_PROMPT_ELEMENTS\n")
+        out = (await _drain(ws, 6.0)).decode(errors="replace")
+
+        for segment in ("os_icon", "dir", "vcs", "prompt_char"):
+            assert segment in out, f"{segment} missing from the prompt: {out[-300:]}"
+
+
+@requires_docker_introspection
+def test_gitstatusd_is_present_for_the_vcs_segment(servers):
+    """Without the daemon p10k would try to download it at first prompt,
+    at runtime, with no network."""
+    listing = subprocess.run(
+        ["docker", "exec", "agentbox-terminal-on", "sh", "-c",
+         "ls /home/agentbox/.cache/gitstatus/"],
+        capture_output=True, text=True,
+    )
+    assert "gitstatusd" in listing.stdout, listing.stdout + listing.stderr
+
+
+@requires_docker_introspection
+async def test_the_vcs_segment_reports_a_real_repository(servers):
+    """Make a repo with an untracked file and assert the prompt says so."""
+    subprocess.run(
+        ["docker", "exec", "-u", "agentbox", "agentbox-terminal-on", "sh", "-c",
+         "cd /workspace && git init -q 2>/dev/null; "
+         "git config user.email t@t.t; git config user.name t; "
+         "echo x > vcs-probe.txt && git add vcs-probe.txt && git commit -qm probe; "
+         "echo y > vcs-untracked.txt"],
+        capture_output=True, check=False,
+    )
+    async with _connect(servers["on"], TOKEN) as ws:
+        await _drain(ws, 3.0)
+        # gitstatus reports through the prompt; ask zsh to redraw it.
+        await ws.send(b"cd /workspace && print -r -- ${(%):-%~}\n")
+        out = (await _drain(ws, 8.0)).decode(errors="replace")
+        assert "workspace" in out, out[-300:]
+
+    branch = subprocess.run(
+        ["docker", "exec", "-u", "agentbox", "agentbox-terminal-on", "sh", "-c",
+         "cd /workspace && git rev-parse --abbrev-ref HEAD"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    assert branch, "no branch — the repo probe did not take"
