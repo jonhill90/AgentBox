@@ -1,155 +1,118 @@
 # AgentBox
 
-Alpine-based MCP server for agent command execution with HTTP/SSE streaming.
+An MCP server that gives an agent a real, **persistent** Chromium browser it can
+drive over Streamable HTTP — navigate, screenshot, click, read text, run JS, and
+click/type/scroll by coordinate, all against the same live page across separate
+tool calls.
 
-**Pattern**: Based on `infra/vibesbox` with Alpine Linux and extended tools.
+**Status: Phase 1** — local Docker only, on the operator's machine. No auth, no
+cloud deployment, no Tailscale. See `docs/PRD.md` and `docs/SPEC.md`.
 
-## Features
+## How the persistence works
 
-- **Streamable HTTP**: Native HTTP support matching vibesbox (port 8054)
-- **Alpine Base**: Minimal footprint (~50MB vs ~200MB Ubuntu)
-- **Easy Package Extension**: Simple array-based package list in Dockerfile
-- **3 MCP Tools**: execute_command, manage_process, health (matches vibesbox)
-- **Docker CLI**: Read-only socket access for container management
-- **Security**: Non-root user, minimal capabilities, resource limits
+A dedicated daemon thread runs a forever asyncio loop that owns one Playwright
+`Page` for the life of the process. Every tool dispatches into that loop via
+`asyncio.run_coroutine_threadsafe`, so the page is never recreated per call and
+its DOM, JS globals, cookies, and session history all survive between calls.
+This pattern is ported from Hill90's `services/agentbox/app/tools.py`.
 
 ## Quick Start
 
 ```bash
-# Configure
-cp .env.example .env
-# Edit VIBES_PATH in .env
+cp .env.example .env      # optional; defaults are fine
 
-# Start
-docker-compose up -d
+docker compose up -d --build
 
-# Test
 curl http://localhost:8054/health
+# {"status":"healthy","service":"agentbox","version":"1.0.0"}
 ```
 
-## Adding Packages
+**MCP endpoint**: `http://localhost:8054/mcp` — transport `streamable-http`.
 
-Edit `Dockerfile` package arrays:
+## MCP Tools (11 total)
 
-```dockerfile
-# Core packages (always installed)
-ARG CORE_PACKAGES="\
-    bash \
-    git \
-    curl \
-    "
+| Tool | Arguments | Returns |
+|---|---|---|
+| `navigate` | `url` | `url`, `status`, `title` |
+| `screenshot` | `full_page=True` | `image_base64` (PNG), `path`, `bytes`, `url` |
+| `click` | `selector` | `url`, `title` |
+| `get_text` | `selector="body"` | `text` (truncated at 4000 chars) |
+| `evaluate` | `script` | `result` (JSON-encoded, truncated at 4000 chars) |
+| `click_at_percent` | `x_percent`, `y_percent` | resolved `x`/`y` pixels, `url` |
+| `type_at` | `text`, optional `x_percent`/`y_percent` | `url` |
+| `press_key` | `key` (`Enter`, `Tab`, `Escape`, …) | `url` |
+| `scroll` | `delta_x=0`, `delta_y=0` | `url` |
+| `history` | `action`: `back` \| `forward` \| `reload` | `url`, `title` |
+| `health` | — | `status`, `browser_started` |
 
-# Add tools as needed - just add to the array!
-ARG EXTRA_PACKAGES="\
-    tree \
-    htop \
-    ncdu \
-    yourpackage \
-    "
-```
+Every tool returns a JSON string with a `success` boolean; failures come back as
+`{"success": false, "error": "..."}` rather than raising.
 
-Rebuild:
+Screenshots are also written to `/workspace/screenshots` inside the container
+(the `agentbox-screenshots` named volume).
+
+There is **no shell/exec tool**. `execute_command` and `manage_process` were
+removed deliberately — a browser-only box has a far smaller blast radius. See
+PRD §1.2 before considering adding them back.
+
+## Testing
+
+The integration test proves the persistent-loop pattern end to end: it navigates,
+takes a screenshot and asserts a real non-empty PNG comes back, then shows the
+page is the *same* page two independent ways — a JS global set in one `evaluate`
+call is readable by a later separate call, and `history back` after a second
+`navigate` returns to the first URL (a fresh page would have no history).
+
 ```bash
-docker-compose up -d --build
+python3 -m venv .venv-test
+.venv-test/bin/pip install pytest pytest-asyncio 'mcp>=1.2.0'
+.venv-test/bin/python -m pytest tests/test_integration.py -v
 ```
 
-## MCP Tools (3 total)
-
-### execute_command
-```python
-execute_command(
-    command="ls -la",
-    shell="/bin/sh",  # optional: /bin/sh or /bin/bash
-    timeout=30  # optional, 1-300 seconds
-)
-# Returns JSON with success, exit_code, stdout, stderr
-```
-
-### manage_process
-```python
-# List processes
-manage_process(action="list")
-
-# Kill process
-manage_process(action="kill", pid=1234)
-
-# Read process output
-manage_process(action="read", pid=1234)
-# Returns JSON with process info
-```
-
-### health
-```python
-health()
-# Returns JSON: {"status": "healthy", "service": "agentbox", "version": "1.0.0"}
-```
+If nothing is listening on `http://localhost:8054/health`, the test runs
+`docker compose up -d --build` itself and tears it down afterwards. If the
+container is already up, it uses it and leaves it running. Set `AGENTBOX_URL` to
+point at a different host/port.
 
 ## Configuration
 
 `.env` options:
-- `VIBES_PATH` - Host path to vibes directory
-- `AGENTBOX_PORT` - External port (default: 8054)
-- `LOG_LEVEL` - Logging level (info, debug, warning, error)
-
-## Integration
-
-**Connection**: `http://localhost:8054/mcp`
-
-**Transport**: `streamable-http` (matches vibesbox pattern)
-
-Note: As Claude Code, I can use these tools directly without additional configuration.
+- `AGENTBOX_PORT` — external port (default: 8054)
+- `LOG_LEVEL` — logging level (info, debug, warning, error)
 
 ## Architecture
 
 ```
-Alpine Linux (python:3.11-alpine)
-├── Core packages (bash, git, curl, wget, jq, vim)
-├── Extra tools (tree, htop, ncdu)
-├── Docker CLI (container management)
-├── Python deps (fastmcp, pydantic, uvicorn)
-└── MCP server (HTTP/SSE on :8000 → :8054)
+python:3.12-slim-bookworm
+├── Chromium system libs (apt — see Dockerfile)
+├── Playwright + Chromium browser (/data/browsers)
+├── Python deps (fastmcp, pydantic, uvicorn, playwright)
+└── src/mcp_server.py
+    ├── persistent browser loop (daemon thread, owns the Page)
+    └── FastMCP streamable-http on :8000 → :8054
 ```
 
-**Security**:
-- User: agentbox (non-root)
-- Capabilities: CHOWN, SETGID, SETUID only
-- Resources: 1 CPU core, 1GB RAM, 200 PIDs
-- Docker: Read-only socket access
-
-## vs Vibesbox
-
-| Feature | Vibesbox | AgentBox |
-|---------|----------|----------|
-| Base | Debian slim | **Alpine** |
-| Size | ~150MB | **~50MB** |
-| Tools | 3 | **3 (same)** |
-| Docker CLI | ❌ | **✅** |
-| Package mgmt | apt | **apk (faster)** |
-| Transport | streamable-http | **streamable-http** |
+Debian is required: Playwright/Chromium does not run on musl libc, so the
+original Alpine base could not work. Resource limits: 1 CPU, 1 GB RAM, 200 PIDs.
+No Docker socket is mounted.
 
 ## Troubleshooting
 
 ```bash
-# Logs
-docker-compose logs -f
-
-# Health
-curl http://localhost:8054/health
-
-# Shell access
-docker-compose exec agentbox sh
-
-# Restart
-docker-compose restart
+docker compose logs -f                 # logs
+curl http://localhost:8054/health      # health
+docker compose exec agentbox bash      # shell
+docker compose restart                 # restart (also resets the browser page)
 ```
 
 ## Files
 
 ```
 agentbox/
-├── Dockerfile          # Alpine base with package arrays
-├── docker-compose.yml  # Service definition
-├── pyproject.toml      # Python dependencies
-└── src/
-    └── mcp_server.py   # FastMCP server with 5 tools
+├── Dockerfile              # Debian slim + Playwright/Chromium
+├── docker-compose.yml      # single service, local only
+├── pyproject.toml          # Python dependencies
+├── docs/                   # PRD.md, SPEC.md
+├── src/mcp_server.py       # FastMCP server + persistent browser loop
+└── tests/test_integration.py
 ```

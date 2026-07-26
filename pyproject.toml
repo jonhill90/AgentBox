@@ -1,14 +1,25 @@
 [project]
 name = "agentbox"
 version = "1.0.0"
-description = "Alpine-based MCP server for agent command execution"
+description = "MCP server exposing a persistent Chromium browser over Streamable HTTP"
 requires-python = ">=3.11"
 dependencies = [
     "fastmcp>=2.0.0",
     "pydantic>=2.0.0",
     "uvicorn>=0.30.0",
+    "playwright>=1.49.1",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "mcp>=1.2.0",
 ]
 
 [tool.ruff]
 line-length = 120
-target-version = "py311"
+target-version = "py312"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

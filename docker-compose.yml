@@ -1,5 +1,5 @@
-# AgentBox MCP Server
-# Pattern: infra/vibesbox with Alpine base and HTTP/SSE streaming
+# AgentBox MCP Server — browser tool over Streamable HTTP
+# Local Docker only. No Docker socket, no external network.
 
 services:
   agentbox:
@@ -22,36 +22,17 @@ services:
           memory: 1G
           pids: 200
 
-    # security_opt:
-    #   - no-new-privileges:true
-
-    # cap_drop:
-    #   - ALL
-    # cap_add:
-    #   - CHOWN
-    #   - SETGID
-    #   - SETUID
-
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ${VIBES_PATH:-/workspace/vibes}:/workspace/vibes:rw
       - agentbox-screenshots:/workspace/screenshots
 
     healthcheck:
-      test: ["CMD", "sh", "-c", "ps aux | grep -v grep | grep -q 'python src/mcp_server.py'"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
 
-    networks:
-      - vibes-network
-
     restart: unless-stopped
-
-networks:
-  vibes-network:
-    external: true
 
 volumes:
   agentbox-screenshots:

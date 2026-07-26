@@ -25,8 +25,12 @@ wheels/
 
 # Virtual environments
 .venv/
+.venv-test/
 venv/
 ENV/
+
+# Test artifacts
+.pytest_cache/
 
 # IDE
 .vscode/
