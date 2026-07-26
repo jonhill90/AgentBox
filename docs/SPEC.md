@@ -346,3 +346,143 @@ and `ws_terminal_handler`).
 6. The terminal's WebSocket reuses §12's `AGENTBOX_AUTH_TOKEN` as its
    `?token=` query param, exactly like Hill90's `ws_terminal_handler`
    reuses `WORK_TOKEN` — one secret, not a second bespoke one.
+
+## 15. Interactive terminal (PRD 1.11) — DRAFT for review
+
+> **Drafted by Claude, not yet authoritative.** Every Hill90 detail below
+> was read from the sources named here. Points needing your decision are
+> marked **DECISION**; points I could not verify are marked **UNVERIFIED**.
+
+**Source has moved.** `hill90-app` now holds this code; the old
+`/Users/jon/source/repos/Personal/Hill90` working tree was emptied when
+the application was extracted on 2026-07-26 (see that repo's
+`RESURRECTION.md`). Read-only reference, as before:
+
+- `hill90-app/services/agentbox/app/ws_terminal.py` (211 lines) — the port target
+- `hill90-app/services/ui/src/app/chat/XTerminal.tsx` (291 lines) — the UI model
+- `hill90-app/services/agentbox/app/pty_shell.py` (158 lines) — **not** in scope, see below
+
+Note that §2, §8 and §9 still point at the old path. Those references are
+now dangling and want a sweep.
+
+### 15.1 What to port
+
+`ws_terminal_handler` as it stands. Concretely:
+
+- **Auth first, before `websocket.accept()`.** The token comes from
+  `?token=`; a mismatch closes with code `4001`, reason `unauthorized`.
+  Rejecting before accepting means an unauthorised client never gets a
+  live socket.
+- **PTY setup:** `pty.openpty()`, `TIOCSWINSZ` to 120x40, `os.fork()`.
+  The child calls `setsid()`, dups the slave onto fds 0/1/2, `chdir`s to
+  `$HOME`, and `execvpe`s with an explicitly constructed environment —
+  `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `TERM=xterm-256color`,
+  `SHELL`. Nothing is inherited from the server process; keep it that way.
+- **Shell resolution:** `tmux new-session -A -s agent -x 120 -y 40` when
+  both tmux and zsh exist, else `zsh --login`, else `bash --login`. The
+  slim base image has none of tmux or zsh, so today this lands on bash.
+  Adding tmux is worthwhile — `-A` reattaches, so a dropped socket does
+  not lose the session.
+- **Relay:** parent sets `O_NONBLOCK` on the master fd, runs a reader
+  task (PTY → WebSocket, `select` with a 100ms timeout in an executor,
+  4096-byte reads, `send_bytes`) while the main loop does WebSocket →
+  PTY via `os.write`.
+- **Resize:** a JSON text frame `{"type":"resize","cols":N,"rows":N}`
+  re-runs `TIOCSWINSZ` on the master and sends `SIGWINCH` to the child.
+- **Teardown:** on disconnect, cancel the reader, close the master fd,
+  `SIGTERM` the child, reap with `waitpid(..., WNOHANG)`.
+
+Wire format, unchanged: binary frames are raw terminal I/O, text frames
+are JSON control messages.
+
+One quirk worth keeping: the Hill90 client sends `{"type":"ping"}`
+keep-alives that the server does not understand. They fall into the
+control handler's `except` and are ignored harmlessly. Port the
+tolerance, not a new opinion about it.
+
+### 15.2 Explicitly NOT in scope
+
+`pty_shell.py` is a different thing — `execute_streaming()` runs one
+argv in a PTY and yields output chunks, with a timeout that escalates
+`SIGTERM` to `SIGKILL`. It is the engine for a streaming
+`execute_command`, which PRD 1.2 rejected and SPEC §14 item 4 still
+gates behind its own decision. The interactive terminal does not need
+it. Do not port it as a bonus.
+
+### 15.3 Toggle and auth
+
+- `AGENTBOX_ENABLE_TERMINAL`, its own flag (§14 item 4), set explicitly
+  in `docker-compose.yml`/`.env.example` like the others.
+  **DECISION:** recommended default `false` even locally — every other
+  toggle defaults on, but this one is a shell.
+- When off, the `WebSocketRoute` is not registered. The trip-wire test
+  is a connection attempt that fails at the transport, not a 403 from a
+  live endpoint.
+- Auth reuses `AGENTBOX_AUTH_TOKEN` via `?token=`. `src/auth.py` needs a
+  small addition: `check_bearer()` takes a full `Authorization` header,
+  so factor out a `check_token(raw: str) -> bool` that both it and the
+  WebSocket path call. Keep `secrets.compare_digest`.
+- **DECISION:** fail closed when `AGENTBOX_AUTH_TOKEN` is unset, as
+  Hill90 does (`if not work_token or token != work_token`). This is the
+  one place where "auth off means open" should not apply.
+
+### 15.4 Route registration (verified)
+
+`mcp.custom_route()` is HTTP-only — it builds a Starlette `Route` and
+its docstring says the handler takes a `Request` and returns a
+`Response`. WebSockets need a `WebSocketRoute`, and FastMCP's
+`streamable_http_app()` does `routes.extend(self._custom_starlette_routes)`,
+which is a plain list. Appending a `WebSocketRoute` to it therefore
+works and keeps `mcp.run(transport="streamable-http")` intact.
+
+Caveat: `_custom_starlette_routes` is private. Pin the behaviour with a
+test that asserts the route is actually reachable, so an SDK bump that
+renames it fails loudly rather than silently dropping the terminal.
+
+### 15.5 UI
+
+Mirror `XTerminal.tsx`'s model, not its React:
+
+- xterm.js with the fit and web-links addons, `binaryType = "arraybuffer"`,
+  `convertEol`, 5000-line scrollback.
+- **Observing by default** (`disableStdin: true`), with a Take Control
+  toggle that enables stdin and attaches `onData` → `ws.send(encoded)`.
+  Status reads Controlling / Observing / Disconnected. This is the same
+  two-state model the browser view uses; reuse the wording.
+- On open, send the fitted dimensions as a resize; re-send on
+  `ResizeObserver` fire. Keep-alive ping every 30s.
+- Reconnect on close except codes `4001` (auth) and `1000` (clean), up
+  to 5 attempts, backoff `min(2000 * n, 10000)`.
+- **DECISION — how xterm.js gets there.** §6 fixed `/ui` as one static
+  page with inline JS, no build step and no new dependencies. xterm.js
+  is ~300KB of npm package. Options: vendor the built `xterm.js` +
+  `xterm.css` into `src/` and serve them as static routes (keeps the
+  no-build-step and works offline, costs a vendored blob in the repo);
+  or load from a CDN (no blob, but breaks the local-only property and
+  fails with no network). Recommended: vendor it.
+
+### 15.6 Container changes
+
+- The image has neither tmux nor zsh; add at least tmux if session
+  reattach is wanted.
+- **DECISION:** the container runs as root today, so the PTY would be a
+  root shell. Hill90's drops to `agentuser` with a scrubbed env. Adding
+  a non-root user is recommended before this ships, and is a bigger
+  change than the terminal itself — it touches file ownership for
+  `/workspace`, the Playwright browser cache, and the screenshots volume.
+
+### 15.7 Tests
+
+- Toggle off: the WebSocket connection fails; no route exists.
+- Toggle on, no token / wrong token: closed with code `4001`, and
+  nothing was accepted first.
+- Toggle on, right token: connect, write `echo agentbox-test\n`, read
+  the echoed output back — the real round-trip proof, equivalent to the
+  browser suite's navigate-then-screenshot.
+- Resize: send a resize frame, then confirm the child observed it (run
+  `tput cols` in the shell and read the answer).
+- Teardown: after the socket closes, no orphaned shell process remains —
+  the same `docker top` technique `test_resilience.py` already uses for
+  Chromium.
+- Auth interaction: the terminal's gate is independent of the §12 HTTP
+  gate; assert both, since they are different code paths.

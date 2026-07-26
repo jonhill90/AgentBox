@@ -269,6 +269,63 @@ or a header-based connector sits in front of, not something thrown away.
 - Missing/wrong token: a clear 401 with a structured error, not a
   silent failure or a raw exception.
 
+### 1.11 Interactive terminal (DRAFT — for review)
+
+> **Drafted by Claude for your review, not yet authoritative.** Grounded in
+> the actual sources in `hill90-app` (see SPEC §15); the three decisions
+> that need your call are marked **DECISION** below.
+
+**User story:** As the operator, I want a real shell inside AgentBox that
+I can watch and type into from the same `/ui` page that already shows me
+the browser — so the box is a place I can actually work, not only a set
+of structured tools an agent calls.
+
+**Why this is last, and why it gets its own toggle:** a PTY is the one
+capability PRD 1.5 argues cannot be contained by allowlisting — once a
+real shell exists, permitted binaries can be chained, and an agent that
+also reads untrusted web content through its own browser tool has a
+standard prompt-injection-to-RCE path. Everything else in Phase 1 was
+built so that this piece can be added deliberately, gated hard, and
+turned off as a single reviewed switch. It is not a general loosening of
+the box; it is one more capability behind one more flag.
+
+**Requirements:**
+
+- Ported from `hill90-app`'s `services/agentbox/app/ws_terminal.py`
+  (read-only reference): a PTY spawned per WebSocket connection,
+  bidirectional relay, binary frames for terminal I/O and JSON text
+  frames for control, plus `SIGWINCH`-backed resize.
+- Its own toggle, `AGENTBOX_ENABLE_TERMINAL`, never shared with
+  `AGENTBOX_ENABLE_JUMPBOX_TOOLS` (SPEC §14 item 4). When off, the
+  WebSocket route is not registered at all — a connection attempt gets a
+  transport-level rejection, not a polite refusal from a live endpoint.
+  Same discipline as §8/§9's tools.
+- Authenticated with the **same** `AGENTBOX_AUTH_TOKEN` from 1.10, as a
+  `?token=` query param, exactly as Hill90's `ws_terminal_handler` reuses
+  `WORK_TOKEN`. One secret, not a second mechanism.
+- **DECISION 1 — fail-closed when no token is set.** Hill90 refuses the
+  socket outright when `WORK_TOKEN` is unset, so it is never exposed
+  unauthenticated even to itself (SPEC §14 item 6 records this as the
+  precedent to carry over). AgentBox's auth is off by default, so
+  mirroring that means the terminal simply does not work until
+  `AGENTBOX_AUTH_TOKEN` is set — even locally. Recommended: mirror it.
+  The alternative (open when auth is off, like every other surface here)
+  is more consistent with the rest of the box but hands a root shell to
+  anything that can reach the port.
+- **DECISION 2 — default off, even for local dev.** Every other toggle
+  defaults on locally. This one is a shell; recommended default is
+  `false`, so turning it on is always an explicit act.
+- **DECISION 3 — who the shell runs as.** The container currently runs
+  as root, and Hill90's PTY drops into a dedicated `agentuser` with a
+  scrubbed environment. A root PTY is a materially worse thing to
+  expose than Hill90's. Recommended: add a non-root user for the shell
+  before this ships.
+- An xterm.js panel in `/ui`, alongside the browser view, mirroring
+  `XTerminal.tsx`: read-only "Observing" by default, with a Take
+  Control toggle that enables stdin — the same two-state model the
+  browser view already uses, so the page has one consistent idea of what
+  "taking control" means.
+
 ### Out of Scope for Phase 1
 
 - OAuth/DCR (that's Phase 2, SPEC §13 — this section's bearer token is
