@@ -58,6 +58,7 @@ tests/test_terminal.py asserts this rather than trusting it.
 """
 
 import asyncio
+import concurrent.futures
 import fcntl
 import json
 import logging
@@ -93,11 +94,22 @@ WS_UNAUTHORIZED = 4001
 # a socket at all.
 AUTH_TIMEOUT = 10.0
 
-# Nothing legitimate is large before auth; this bounds pre-auth memory.
+# Rejected above this size. Note the frame is fully buffered by the
+# websockets layer before we see it, so the real memory bound is that
+# library's own max-size, not this number.
 MAX_AUTH_MESSAGE_BYTES = 4096
 
 # How many non-auth control frames to tolerate before giving up.
 MAX_AUTH_ATTEMPTS = 5
+
+# PTY readers park a thread in a blocking select() for the life of a session.
+# They get their OWN pool: parked on asyncio's default executor they would
+# occupy the same threads asyncio.to_thread uses for every browser tool and
+# /api/browser/* route, so enough terminal sessions would wedge the entire
+# HTTP surface with no error.
+_PTY_READERS = concurrent.futures.ThreadPoolExecutor(
+    max_workers=64, thread_name_prefix="agentbox-pty-reader",
+)
 
 
 def _resolve_shell() -> tuple[list[str], str]:
@@ -132,8 +144,10 @@ def _resolve_shell() -> tuple[list[str], str]:
 def _child_env() -> dict[str, str]:
     """The environment the shell gets — built explicitly, never inherited.
 
-    The server process holds AGENTBOX_AUTH_TOKEN; handing its environment
-    to a shell would leak the token to anything run in the terminal.
+    Defence in depth only. The shell runs as the SAME uid as this process, so
+    it could read /proc/1/environ regardless — what actually keeps the token
+    out of its reach is auth.py scrubbing the values from os.environ once
+    they are loaded.
     """
     home = os.environ.get("HOME", "/root")
     user = os.environ.get("USER", "root")
@@ -341,10 +355,23 @@ async def terminal_websocket(websocket: WebSocket) -> None:
                 os.kill(pid, signal.SIGTERM)
             except OSError:
                 pass
-            try:
-                os.waitpid(pid, os.WNOHANG)
-            except ChildProcessError:
-                pass
+            # Actually reap it. A bare WNOHANG here returns before the child
+            # has died and leaves a zombie per session — with PidsLimit=200,
+            # ~180 connect/disconnect cycles exhausted the PID namespace and
+            # nothing could fork again for the life of the container.
+            for _ in range(50):
+                try:
+                    if os.waitpid(pid, os.WNOHANG)[0] != 0:
+                        break
+                except ChildProcessError:
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                    os.waitpid(pid, 0)
+                except (OSError, ChildProcessError):
+                    pass
         logger.info("Terminal session closed")
 
 
@@ -355,7 +382,7 @@ async def _pty_reader(master_fd: int, websocket: WebSocket) -> None:
     try:
         while True:
             ready = await loop.run_in_executor(
-                None, lambda: select.select([master_fd], [], [], 0.1)
+                _PTY_READERS, lambda: select.select([master_fd], [], [], 0.1)
             )
 
             if ready[0]:

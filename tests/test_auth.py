@@ -96,12 +96,40 @@ def authed_server():
 
 
 async def _call_tool(url: str, name: str, args: dict, token: str | None = None):
+    """Call a tool. Raises if the transport itself refuses us.
+
+    /mcp is gated as a whole, not merely per tool invocation, so an
+    unauthenticated caller is refused at the HTTP layer and never reaches
+    `initialize` — see _assert_mcp_refused.
+    """
     headers = {"Authorization": f"Bearer {token}"} if token else None
     async with streamablehttp_client(f"{url}/mcp", headers=headers) as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
             result = await session.call_tool(name, args)
             return json.loads(result.content[0].text)
+
+
+async def _assert_mcp_refused(url: str, token: str | None = None):
+    """The whole MCP endpoint must refuse, not just the tool call.
+
+    Gating per-invocation left `initialize` and `tools/list` answerable to
+    anyone, which handed an unauthenticated caller the exact feature-toggle
+    state and let them allocate session state.
+    """
+    with pytest.raises(Exception) as exc:
+        await _call_tool(url, "health", {}, token=token)
+
+    # The MCP client wraps transport errors in an ExceptionGroup, and
+    # str(ExceptionGroup) does not include its sub-exceptions — so a naive
+    # `"401" in str(exc.value)` never matches. Walk the tree.
+    def _flatten(e):
+        yield e
+        for sub in getattr(e, "exceptions", ()):
+            yield from _flatten(sub)
+
+    text = " ".join(str(e) for e in _flatten(exc.value))
+    assert "401" in text, text
 
 
 # ── auth OFF: the default this whole suite runs under ────────────────
@@ -224,18 +252,12 @@ def test_every_api_route_is_gated(authed_server):
 
 @requires_docker_introspection
 async def test_mcp_tool_rejects_a_missing_token(authed_server):
-    result = await _call_tool(authed_server, "navigate", {"url": "https://example.com/"})
-    assert result["success"] is False, result
-    assert result["status"] == 401, result
-    assert "Unauthorized" in result["error"], result
+    await _assert_mcp_refused(authed_server)
 
 
 @requires_docker_introspection
 async def test_mcp_tool_rejects_a_wrong_token(authed_server):
-    result = await _call_tool(
-        authed_server, "navigate", {"url": "https://example.com/"}, token=WRONG_TOKEN
-    )
-    assert result["success"] is False and result["status"] == 401, result
+    await _assert_mcp_refused(authed_server, token=WRONG_TOKEN)
 
 
 @requires_docker_introspection
@@ -250,19 +272,17 @@ async def test_mcp_tool_accepts_the_right_token(authed_server):
 @requires_docker_introspection
 async def test_a_gated_jumpbox_tool_is_also_covered(authed_server):
     """Auth and the §10 toggle are independent gates; both apply."""
-    denied = await _call_tool(authed_server, "read_file", {"path": "/workspace"})
-    assert denied["success"] is False and denied["status"] == 401, denied
+    await _assert_mcp_refused(authed_server)
 
     allowed = await _call_tool(authed_server, "read_file", {"path": "/workspace"}, token=TOKEN)
-    assert allowed["status"] != 401 if "status" in allowed else True, allowed
+    assert allowed.get("status") != 401, allowed
     assert "Unauthorized" not in str(allowed.get("error", "")), allowed
 
 
 @requires_docker_introspection
 async def test_health_tool_is_gated_even_though_the_route_is_not(authed_server):
     """GET /health is the healthcheck target; the MCP `health` tool is not."""
-    denied = await _call_tool(authed_server, "health", {})
-    assert denied["success"] is False and denied["status"] == 401, denied
+    await _assert_mcp_refused(authed_server)
 
     allowed = await _call_tool(authed_server, "health", {}, token=TOKEN)
     assert allowed["status"] == "healthy", allowed
@@ -271,8 +291,7 @@ async def test_health_tool_is_gated_even_though_the_route_is_not(authed_server):
 @requires_docker_introspection
 async def test_unauthorized_answer_never_leaks_browser_state(authed_server):
     """A refusal must not double as an oracle for what the page is doing."""
-    result = await _call_tool(authed_server, "screenshot", {})
-    assert set(result) == {"success", "status", "error"}, result
+    await _assert_mcp_refused(authed_server)
 
 
 @requires_docker_introspection

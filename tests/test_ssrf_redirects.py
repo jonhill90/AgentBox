@@ -15,7 +15,6 @@ stays firmly inside a blocked range. That is the only thing patched;
 the code under test is untouched.
 """
 
-import ipaddress
 import json
 import sys
 import threading
@@ -88,11 +87,7 @@ def loopback_reachable(monkeypatch):
     Every other blocked range — crucially the redirect targets used below —
     stays in place.
     """
-    without_loopback = [
-        cidr for cidr in jumpbox_tools._BLOCKED_CIDRS
-        if cidr != ipaddress.ip_network("127.0.0.0/8")
-    ]
-    monkeypatch.setattr(jumpbox_tools, "_BLOCKED_CIDRS", without_loopback)
+    monkeypatch.setattr(jumpbox_tools, "ALLOW_LOOPBACK", True)
 
 
 async def test_the_test_server_is_reachable_when_loopback_is_lifted(

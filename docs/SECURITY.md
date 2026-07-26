@@ -150,6 +150,27 @@ only long enough to fix volume ownership, then drops with
 capabilities. Tests assert the server process is not root, the shell is not
 root, and the shell can still write `/workspace`.
 
+## Open findings from the security audit
+
+Found by an adversarial audit, confirmed by demonstration, **not yet fixed**:
+
+- **DNS-rebinding TOCTOU in `http_request`.** `is_blocked_host` resolves the
+  name, then httpx resolves it again independently. A TTL-0 record answering
+  public once and private the second time gets through. The complete fix is
+  to resolve once and pin the connection to the vetted address, carrying the
+  hostname in `Host`/SNI. The blocklist itself is now correct; this is the
+  gap between checking and connecting.
+- **`navigate` + `evaluate` are a second, unguarded egress path.** The SSRF
+  blocklist applies only to `http_request`. The browser can be navigated to
+  `http://169.254.169.254/` and its content read back with `get_text`, and
+  `evaluate` runs arbitrary JavaScript which can `fetch()` anything. Any
+  authenticated caller has this. It is not a bypass of a control — no control
+  was ever applied there — but the security story should say so plainly.
+- **`http_request` buffers the whole response before truncating**, so a
+  hostile endpoint returning a multi-GB body can OOM the container.
+- **No cap on concurrent pre-auth WebSocket sockets.** Each is bounded to 10s,
+  so this is availability-only.
+
 ## Known limitations, accepted for Phase 1
 
 - **One shared page, one shared workspace, one shared token.** Single

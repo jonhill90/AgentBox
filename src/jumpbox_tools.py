@@ -80,6 +80,13 @@ async def write_file(path: str, content: str) -> str:
     if not allowed:
         return json.dumps({"success": False, "error": reason})
 
+    # Operate on the RESOLVED path. check_write validates realpath(path), but
+    # os.makedirs walks the literal string and recurses through ".."
+    # components, materialising every intermediate directory — so a path whose
+    # realpath is inside /workspace could still mkdir -p anywhere this uid can
+    # write, including $HOME where the shell's startup files live.
+    path = os.path.realpath(path)
+
     try:
         parent = os.path.dirname(path)
         if parent:
@@ -183,7 +190,7 @@ async def execute_git(action: str, paths: str = ".", message: str = "", count: i
 
         elif action == "add":
             targets = paths.split() or ["."]
-            rc, _out, err = await _git("add", *targets)
+            rc, _out, err = await _git("add", "--", *targets)
             if rc != 0:
                 return json.dumps({"success": False, "error": err})
             return json.dumps({"success": True, "output": f"Staged: {' '.join(targets)}"})
@@ -225,31 +232,64 @@ async def execute_git(action: str, paths: str = ".", message: str = "", count: i
 
 # ── http_request (SPEC §9, from Hill90 tools.py) ─────────────────────
 #
-# SSRF protection: resolve the hostname and check the *resolved IP*
-# against the blocklist, rather than string-matching the URL — otherwise
-# a DNS name pointing at 127.0.0.1 walks straight through.
+# SSRF protection: resolve the hostname and check the *resolved IP* against
+# the blocklist, rather than string-matching the URL.
+#
+# KNOWN LIMITATION, do not overstate this: the check and the connection
+# resolve DNS independently, so a TTL-0 record answering public once and
+# private the second time still gets through (classic rebinding TOCTOU). The
+# complete fix is to resolve once and pin the connection to the vetted
+# address with the hostname carried in Host/SNI. Tracked in docs/SECURITY.md.
 
-_BLOCKED_CIDRS = [
-    ipaddress.ip_network("127.0.0.0/8"),      # loopback
-    ipaddress.ip_network("10.0.0.0/8"),       # RFC1918
-    ipaddress.ip_network("172.16.0.0/12"),    # RFC1918
-    ipaddress.ip_network("192.168.0.0/16"),   # RFC1918
-    ipaddress.ip_network("169.254.0.0/16"),   # link-local (incl. cloud metadata)
+# CGNAT is the only range Python's ipaddress does not already classify, and
+# it is the one Tailscale uses. Everything else is covered by the property
+# checks in _addr_blocked, which are exhaustive in a way a hand-maintained
+# CIDR list is not — the previous list silently omitted 0.0.0.0/8 (which
+# reaches 127.0.0.1 on Linux) and every IPv6 range.
+_EXTRA_BLOCKED = [
     ipaddress.ip_network("100.64.0.0/10"),    # CGNAT — the Tailscale range
+    ipaddress.ip_network("192.0.0.0/24"),     # IETF protocol assignments
+    ipaddress.ip_network("198.18.0.0/15"),    # benchmarking
 ]
 
 
+# Tests set this to reach a redirect server on loopback. It exists so the
+# suite can lift EXACTLY loopback and nothing else, and so the lift is
+# visible in the source rather than achieved by monkeypatching internals.
+ALLOW_LOOPBACK = False
+
+
+def _addr_blocked(addr) -> bool:
+    """True if this address must never be reached."""
+    if ALLOW_LOOPBACK and addr.is_loopback:
+        return False
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
+        addr = addr.ipv4_mapped          # ::ffff:127.0.0.1 is loopback
+    if (addr.is_private or addr.is_loopback or addr.is_link_local
+            or addr.is_reserved or addr.is_multicast or addr.is_unspecified):
+        return True
+    return any(addr in cidr for cidr in _EXTRA_BLOCKED
+               if cidr.version == addr.version)
+
+
 def is_blocked_host(hostname: str) -> bool:
-    """True if the hostname resolves into a blocked range (or not at all)."""
+    """True if the hostname resolves into a blocked range (or not at all).
+
+    Resolves AF_UNSPEC, not AF_INET. httpx resolves both families and prefers
+    IPv6 per RFC 6724, so checking only A records let a name with a public A
+    and a private AAAA through to the private address.
+    """
     try:
-        addrs = socket.getaddrinfo(hostname, None, socket.AF_INET)
-        for _, _, _, _, (ip, _) in addrs:
-            addr = ipaddress.ip_address(ip)
-            for cidr in _BLOCKED_CIDRS:
-                if addr in cidr:
-                    return True
-    except socket.gaierror:
-        return True  # Can't resolve — block
+        addrs = socket.getaddrinfo(hostname, None)
+    except (socket.gaierror, UnicodeError, OSError):
+        return True  # Can't resolve (or the name is malformed) — block
+    for family, _, _, _, sockaddr in addrs:
+        try:
+            addr = ipaddress.ip_address(sockaddr[0].split("%")[0])
+        except ValueError:
+            return True
+        if _addr_blocked(addr):
+            return True
     return False
 
 

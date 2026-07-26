@@ -126,7 +126,12 @@ def _origin_allowed(origin: str | None) -> bool:
         return False
     if parsed.scheme not in ("http", "https"):
         return False
-    return _host_allowed(parsed.netloc)
+    # .hostname, not .netloc: netloc carries userinfo, and a later rsplit on
+    # ":" would truncate "localhost:8054@evil.com" down to "localhost".
+    host = parsed.hostname
+    if host is None:
+        return False
+    return host in ALLOWED_HOSTS or f"[{host}]" in ALLOWED_HOSTS
 
 
 def request_origin_ok(headers) -> bool:
@@ -144,6 +149,22 @@ class RebindingGuard:
         if scope["type"] in ("http", "websocket"):
             headers = {k.decode("latin-1").lower(): v.decode("latin-1")
                        for k, v in scope.get("headers", [])}
+
+            # Gate the MCP endpoint itself, not merely each tool call. Auth
+            # applied per-invocation left `initialize` and `tools/list`
+            # answerable to anyone, which handed an unauthenticated caller
+            # the exact feature-toggle state and let them allocate unbounded
+            # session state — undercutting §10's "absent, not refusing".
+            if (auth.auth_enabled() and scope.get("path", "").startswith("/mcp")
+                    and not auth.check_bearer(headers.get("authorization"))):
+                logger.warning("Unauthorized MCP request: %s", scope.get("path"))
+                await send({"type": "http.response.start", "status": 401,
+                            "headers": [(b"content-type", b"application/json"),
+                                        (b"www-authenticate", b'Bearer realm="agentbox"')]})
+                await send({"type": "http.response.body",
+                            "body": json.dumps(auth.UNAUTHORIZED_BODY).encode()})
+                return
+
             if not request_origin_ok(headers):
                 logger.warning(
                     "Blocked request: host=%r origin=%r (DNS-rebinding guard)",
@@ -536,7 +557,20 @@ async def vendor_asset(request):
 async def ui_page(request):
     """Serve the single-page take-control viewer."""
     try:
-        return HTMLResponse(UI_HTML_PATH.read_text(encoding="utf-8"))
+        return HTMLResponse(
+            UI_HTML_PATH.read_text(encoding="utf-8"),
+            headers={
+                # Any page could otherwise iframe this and drive the browser
+                # (and, if the terminal is on, the shell) — requests from
+                # inside the frame are same-origin, so RebindingGuard passes
+                # them. Clickjacking is the whole attack.
+                "X-Frame-Options": "DENY",
+                "Content-Security-Policy":
+                    "frame-ancestors 'none'; default-src 'self'; "
+                    "img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+                    "script-src 'self' 'unsafe-inline'; connect-src 'self'",
+            },
+        )
     except OSError as exc:
         logger.error(f"Cannot read UI page at {UI_HTML_PATH}: {exc}")
         return JSONResponse({"error": "UI page not found"}, status_code=500)

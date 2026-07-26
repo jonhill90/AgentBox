@@ -27,6 +27,8 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 from conftest import (
+    AUTH_TOKEN,
+    BASE_URL,
     CONTAINER,
     EXPECTED_TOOLS,
     call,
@@ -82,8 +84,9 @@ def toggled_off_server():
         subprocess.run(["docker", "rm", "-f", OFF_CONTAINER], capture_output=True, check=False)
 
 
-async def _tools_at(url: str) -> set[str]:
-    async with streamablehttp_client(f"{url}/mcp") as (read, write, _):
+async def _tools_at(url: str, token: str | None = None) -> set[str]:
+    headers = {"Authorization": f"Bearer {token}"} if token else None
+    async with streamablehttp_client(f"{url}/mcp", headers=headers) as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
             return {t.name for t in (await session.list_tools()).tools}
@@ -92,14 +95,14 @@ async def _tools_at(url: str) -> set[str]:
 # ── flag ON (the local-dev default the rest of the suite runs under) ──
 
 async def test_gated_tools_are_registered_when_the_flag_is_on():
-    tools = await _tools_at("http://localhost:8054")
+    tools = await _tools_at(BASE_URL, AUTH_TOKEN or None)
     missing = GATED_TOOLS - tools
     assert not missing, f"jumpbox tools missing with the flag on: {missing}"
 
 
 async def test_flag_on_surface_is_core_plus_gated_and_nothing_else():
     """No tool has crept onto the surface beyond §5's core list plus §8/§9."""
-    tools = await _tools_at("http://localhost:8054")
+    tools = await _tools_at(BASE_URL, AUTH_TOKEN or None)
     assert tools == EXPECTED_TOOLS | GATED_TOOLS, f"unexpected tool surface: {tools}"
 
 

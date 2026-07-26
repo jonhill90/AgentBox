@@ -58,11 +58,16 @@ def _read_secret(name: str) -> str:
     """
     path = os.environ.get(f"{name}_FILE", "").strip()
     if path:
+        # FAIL CLOSED. Returning "" here would make auth_enabled() False and
+        # bring the server up with every tool and route unauthenticated,
+        # announcing it only in a log line nobody reads. An explicitly
+        # configured secret that cannot be loaded is a fatal misconfiguration
+        # — and a root-owned 0600 bind-mount is exactly the shape that
+        # triggers it, since the entrypoint drops to uid 1000 before start.
         try:
             return pathlib.Path(path).read_text(encoding="utf-8").strip()
-        except OSError as exc:
-            logger.error(f"Cannot read {name}_FILE at {path}: {exc}")
-            return ""
+        except (OSError, UnicodeDecodeError) as exc:
+            raise SystemExit(f"FATAL: cannot read {name}_FILE at {path}: {exc}")
     return os.environ.get(name, "").strip()
 
 
@@ -78,6 +83,14 @@ AUTH_TOKEN = _read_secret("AGENTBOX_AUTH_TOKEN")
 # both are set. OWASP: "You should regularly rotate secrets so that any
 # stolen credentials will only work for a short time."
 AUTH_TOKEN_PREVIOUS = _read_secret("AGENTBOX_AUTH_TOKEN_PREVIOUS")
+
+# Scrub the secrets from our own environment now that they are loaded.
+# _child_env() in terminal.py builds the shell's environment explicitly so it
+# cannot inherit the token — but the shell runs as the SAME uid as this
+# process, so it can simply read /proc/1/environ. Removing the values here is
+# what actually closes that, and _child_env stays as defence in depth.
+for _var in ("AGENTBOX_AUTH_TOKEN", "AGENTBOX_AUTH_TOKEN_PREVIOUS"):
+    os.environ.pop(_var, None)
 
 UNAUTHORIZED_ERROR = "Unauthorized: missing or invalid Bearer token"
 
@@ -134,10 +147,14 @@ def check_bearer(authorization: str | None) -> bool:
     Mirrors Hill90's `_check_auth`: no configured token means deny,
     the `Bearer ` prefix is required, and the remainder must match.
     """
-    if not authorization or not authorization.startswith("Bearer "):
+    if not authorization:
         return False
 
-    return check_token(authorization[7:])  # len("Bearer ") == 7
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer":   # RFC 7235: the scheme is case-insensitive
+        return False
+
+    return check_token(token)
 
 
 def authorization_from_mcp_request() -> str | None:

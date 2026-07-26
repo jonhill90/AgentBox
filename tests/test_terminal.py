@@ -17,7 +17,9 @@ the gate.
 """
 
 import json
+import re
 import subprocess
+import uuid
 import time
 import urllib.error
 import urllib.request
@@ -111,6 +113,32 @@ def _connect(port: int, token: str | None = None):
     """
     headers = {"Authorization": f"Bearer {token}"} if token else None
     return websockets.connect(_ws_url(port), additional_headers=headers)
+
+
+_ANSI = re.compile(rb"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][B0]|\x1b[=><]")
+
+
+def _plain(raw: bytes) -> bytes:
+    """Terminal output with escape sequences removed.
+
+    tmux redraws are full of cursor-positioning and mode escapes that contain
+    digits and letters, so raw substring assertions match things that are not
+    program output at all.
+    """
+    return _ANSI.sub(b"", raw)
+
+
+def _fresh_shell(container: str = "agentbox-terminal-on") -> None:
+    """Kill the tmux server so the next connect gets a clean session.
+
+    terminal.py uses `tmux new-session -A`, which is what makes a dropped
+    socket reattach — but it also means every test in this file shares one
+    session and sees the previous test's scrollback on reattach. Without this
+    the file is order-dependent and assertions match other tests' output.
+    """
+    subprocess.run(["docker", "exec", container, "tmux", "kill-server"],
+                   capture_output=True, check=False)
+    time.sleep(0.5)
 
 
 async def _drain(ws, seconds: float = 3.0) -> bytes:
@@ -220,17 +248,23 @@ async def test_right_token_connects(servers):
 @requires_docker_introspection
 async def test_echo_round_trip_through_the_pty(servers):
     """The proof the relay works, equivalent to navigate-then-screenshot."""
+    _fresh_shell()
     async with _connect(servers["on"], TOKEN) as ws:
         await _drain(ws, 2.0)  # let the shell/tmux draw its prompt
 
-        await ws.send(b"echo agentbox-terminal-works\n")
+        # The marker is COMPUTED by the shell. zsh echoes typed characters
+        # back over the PTY, so asserting on a literal that appears in the
+        # command line passes whether or not the command ever ran — that is
+        # how this test used to pass vacuously.
+        await ws.send(b"echo agentbox-$((21*2))-works\n")
         output = await _drain(ws, 6.0)
 
-        assert b"agentbox-terminal-works" in output, output[-400:]
+        assert b"agentbox-42-works" in output, output[-400:]
 
 
 @requires_docker_introspection
 async def test_shell_sees_the_workspace(servers):
+    _fresh_shell()
     async with _connect(servers["on"], TOKEN) as ws:
         await _drain(ws, 2.0)
         await ws.send(b"pwd\n")
@@ -241,20 +275,26 @@ async def test_shell_sees_the_workspace(servers):
 @requires_docker_introspection
 async def test_resize_control_frame_reaches_the_shell(servers):
     """A JSON text frame must move the child's idea of the terminal size."""
+    _fresh_shell()
     async with _connect(servers["on"], TOKEN) as ws:
         await _drain(ws, 2.0)
 
-        await ws.send(json.dumps({"type": "resize", "cols": 100, "rows": 30}))
+        # 137, not 100: tmux emits mouse-mode escapes like \x1b[?1000h on
+        # redraw, so b"100" appeared in the drain no matter what the width
+        # was. Escapes are also stripped before asserting, for the same
+        # reason — the digits inside them are not program output.
+        await ws.send(json.dumps({"type": "resize", "cols": 137, "rows": 30}))
         await asyncio.sleep(0.5)
 
         await ws.send(b"tput cols\n")
-        output = await _drain(ws, 6.0)
-        assert b"100" in output, output[-400:]
+        output = _plain(await _drain(ws, 6.0))
+        assert b"137" in output, output[-400:]
 
 
 @requires_docker_introspection
 async def test_unknown_control_frames_are_ignored(servers):
     """Hill90's client sends {"type":"ping"}; the server must tolerate it."""
+    _fresh_shell()
     async with _connect(servers["on"], TOKEN) as ws:
         await _drain(ws, 2.0)
 
@@ -263,9 +303,9 @@ async def test_unknown_control_frames_are_ignored(servers):
         await asyncio.sleep(0.3)
 
         # Still alive and still relaying.
-        await ws.send(b"echo still-here\n")
+        await ws.send(b"echo still-$((6*7))-here\n")
         output = await _drain(ws, 6.0)
-        assert b"still-here" in output, output[-400:]
+        assert b"still-42-here" in output, output[-400:]
 
 
 @requires_docker_introspection
@@ -275,6 +315,7 @@ async def test_the_shell_does_not_inherit_the_auth_token(servers):
     _child_env() builds the environment explicitly rather than inheriting,
     precisely so a terminal session cannot read the secret that let it in.
     """
+    _fresh_shell()
     async with _connect(servers["on"], TOKEN) as ws:
         await _drain(ws, 2.0)
         await ws.send(b"echo TOKEN_IS[$AGENTBOX_AUTH_TOKEN]\n")
@@ -338,6 +379,7 @@ def test_server_process_does_not_run_as_root(servers):
 async def test_the_shell_is_not_root(servers):
     """A root PTY is a materially worse thing to hand out than an
     unprivileged one. This is the test that keeps it that way."""
+    _fresh_shell()
     async with _connect(servers["on"], TOKEN) as ws:
         await _drain(ws, 2.0)
         await ws.send(b"id -u; id -un\n")
@@ -352,31 +394,43 @@ async def test_the_shell_is_not_root(servers):
 async def test_the_shell_can_write_to_the_workspace(servers):
     """Dropping root must not cost the shell its own workspace — the
     entrypoint chowns the volume precisely so this keeps working."""
+    _fresh_shell()
     async with _connect(servers["on"], TOKEN) as ws:
         await _drain(ws, 2.0)
-        await ws.send(b"touch /workspace/.perm-check && echo WRITABLE\n")
-        output = await _drain(ws, 6.0)
-        assert b"WRITABLE" in output, output[-300:]
+        marker = f"/workspace/.perm-{uuid.uuid4().hex[:8]}"
+        await ws.send(("touch " + marker + "\n").encode())
+        await _drain(ws, 5.0)
+        await asyncio.sleep(1.0)
+
+    # Checked from outside the terminal, so the shell's own echo cannot
+    # satisfy it — the same technique test_no_pty_is_spawned_before_auth uses.
+    check = subprocess.run(
+        ["docker", "exec", "agentbox-terminal-on", "test", "-f", marker],
+        capture_output=True,
+    )
+    assert check.returncode == 0, f"{marker} was not created — the shell cannot write"
 
 
 @requires_docker_introspection
 async def test_no_zsh_first_run_wizard(servers):
     """zsh runs zsh-newuser-install when ~/.zshrc is missing, which eats
     the opening keystrokes of a session. theme/zshrc exists to stop it."""
+    _fresh_shell()
     async with _connect(servers["on"], TOKEN) as ws:
         opening = await _drain(ws, 3.0)
         assert b"newuser" not in opening.lower(), opening[-400:]
         assert b"Aborting" not in opening, opening[-400:]
 
         # And the very first keystrokes are not swallowed.
-        await ws.send(b"echo first-keystrokes-survive\n")
+        await ws.send(b"echo first-$((20+2))-survive\n")
         output = await _drain(ws, 6.0)
-        assert b"first-keystrokes-survive" in output, output[-400:]
+        assert b"first-22-survive" in output, output[-400:]
 
 
 @requires_docker_introspection
 async def test_the_shell_gets_the_tmux_theme(servers):
     """The Tokyo Night config has to be found in the new HOME."""
+    _fresh_shell()
     async with _connect(servers["on"], TOKEN) as ws:
         await _drain(ws, 2.0)
         await ws.send(b"tmux show -g status-position; tmux show -gq @theme_variation\n")
@@ -422,9 +476,9 @@ async def test_browser_style_post_connect_auth(servers):
         assert ok["type"] == "auth_ok", ok
 
         await _drain(ws, 2.0)
-        await ws.send(b"echo post-connect-auth-works\n")
+        await ws.send(b"echo post-$((40+2))-auth-works\n")
         out = await _drain(ws, 6.0)
-        assert b"post-connect-auth-works" in out, out[-300:]
+        assert b"post-42-auth-works" in out, out[-300:]
 
 
 @requires_docker_introspection
@@ -475,6 +529,7 @@ async def test_prompt_is_powerlevel10k_with_os_and_git_segments(servers):
     bundled, which loses the git branch and status icons. The daemon is
     pre-fetched at build time here so the segment works.
     """
+    _fresh_shell()
     async with _connect(servers["on"], TOKEN) as ws:
         await _drain(ws, 3.0)
         await ws.send(b"print -l -- $POWERLEVEL9K_LEFT_PROMPT_ELEMENTS\n")
@@ -499,6 +554,7 @@ def test_gitstatusd_is_present_for_the_vcs_segment(servers):
 @requires_docker_introspection
 async def test_the_vcs_segment_reports_a_real_repository(servers):
     """Make a repo with an untracked file and assert the prompt says so."""
+    _fresh_shell()
     subprocess.run(
         ["docker", "exec", "-u", "agentbox", "agentbox-terminal-on", "sh", "-c",
          "cd /workspace && git init -q 2>/dev/null; "
@@ -507,12 +563,22 @@ async def test_the_vcs_segment_reports_a_real_repository(servers):
          "echo y > vcs-untracked.txt"],
         capture_output=True, check=False,
     )
+    # A branch name that cannot appear anywhere else — not in the prompt's
+    # dir segment, not in the echoed command. The old assertion looked for
+    # "workspace", which is in both, so it passed without the vcs segment
+    # rendering at all.
+    branch = f"probe-{uuid.uuid4().hex[:6]}"
+    subprocess.run(
+        ["docker", "exec", "-u", "agentbox", "agentbox-terminal-on", "sh", "-c",
+         f"cd /workspace && git checkout -q -b {branch}"],
+        capture_output=True, check=False,
+    )
     async with _connect(servers["on"], TOKEN) as ws:
-        await _drain(ws, 3.0)
-        # gitstatus reports through the prompt; ask zsh to redraw it.
-        await ws.send(b"cd /workspace && print -r -- ${(%):-%~}\n")
-        out = (await _drain(ws, 8.0)).decode(errors="replace")
-        assert "workspace" in out, out[-300:]
+        await _drain(ws, 4.0)
+        # Force a fresh prompt so gitstatus repaints the vcs segment.
+        await ws.send(b"cd /workspace && true\n")
+        out = (await _drain(ws, 10.0)).decode(errors="replace")
+        assert branch in out, f"vcs segment never rendered the branch: {out[-400:]}"
 
     branch = subprocess.run(
         ["docker", "exec", "-u", "agentbox", "agentbox-terminal-on", "sh", "-c",
