@@ -366,6 +366,30 @@ and `ws_terminal_handler`).
    runbook in `docs/runbooks/rotate-auth-token.md` has never been run
    end to end. An untested rotation procedure is one that will not be
    used under pressure.
+10. **DECISION — dependency pinning, and pip vs uv.** `pyproject.toml`
+    declares every dependency as a floating minimum (`fastmcp>=2.0.0`,
+    `playwright>=1.49.1`, and the rest), and there is no lockfile. So
+    `docker compose build --no-cache` re-resolves them every time and can
+    produce a materially different image with no signal that it did. This
+    is the one unpinned surface in a repo that otherwise pins
+    deliberately: the bookworm base, the tmux theme at `fcfde9a`, FiraCode
+    at `v3.3.0`, Chromium via Playwright. hill90-app locks its equivalent
+    service with `poetry.lock`.
+
+    Tangled with it, but not the same question: the operator's standing
+    preference (`$AGENT_MEMORY_VAULT`, `python-package-manager-uv`,
+    recorded 2026-07-18) is uv, never pip or venv. `Dockerfile:129` uses
+    `pip install -e .`, inherited from the initial commit of 2025-11-02 —
+    it predates the preference rather than contradicting it.
+
+    Adopting uv would deliver the lockfile and satisfy the preference in
+    one move, at the cost of one more image dependency (`COPY --from` the
+    uv image) in a repo that minimises them. Staying on pip and adding a
+    lockfile another way is also viable.
+
+    Not decided. Do not migrate the build on your own initiative. Lock
+    from a known-green state when this is taken up — the suite was at
+    257 pass / 3 skip when this was written.
 
 ## 15. Interactive terminal (PRD 1.11) — BUILT
 
