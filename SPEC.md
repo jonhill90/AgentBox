@@ -481,7 +481,7 @@ Mirror `XTerminal.tsx`'s model, not its React:
   1KB subset cannot cover and a CDN font is not an option.
 - **CHOSEN: the container no longer runs as root.** A `agentbox` user
   (uid 1000) owns `/workspace`, the screenshots volume and the
-  Playwright browser cache, and `docker-entrypoint.sh` drops privileges
+  Playwright browser cache, and `scripts/entrypoint.sh` drops privileges
   with `setpriv --inh-caps=-all` after fixing volume ownership. The
   entrypoint exists rather than a bare `USER` directive because a named
   volume created by an earlier root-running build stays root-owned; the
@@ -509,7 +509,7 @@ Mirror `XTerminal.tsx`'s model, not its React:
 
 **Implemented in** `src/terminal.py`, `src/mcp_server.py` (route
 registration and toggle), `src/ui.html` (panel), `theme/`,
-`docker-entrypoint.sh`. **Tested in** `tests/test_terminal.py`
+`scripts/entrypoint.sh`. **Tested in** `tests/test_terminal.py`
 (20 tests) and `tests/test_ui_api.py`.
 
 ## 16. Git push credentials (jumpbox tooling)

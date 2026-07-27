@@ -51,7 +51,7 @@ handshake but not its WebSocket receive path, which was a pre-auth RCE
 exactly one message type, caps its size, and holds a deadline.
 
 The shell is NOT root. The container runs as the `agentbox` user (uid
-1000) — docker-entrypoint.sh fixes volume ownership and then drops
+1000) — scripts/entrypoint.sh fixes volume ownership and then drops
 privileges with setpriv before the server ever starts — so the PTY
 hands out an unprivileged shell, matching Hill90's `agentuser`.
 tests/test_terminal.py asserts this rather than trusting it.

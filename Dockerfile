@@ -146,8 +146,8 @@ RUN mkdir -p /workspace/screenshots && \
 ENV HOME=/home/agentbox
 ENV USER=agentbox
 
-COPY docker-entrypoint.sh /usr/local/bin/agentbox-entrypoint
-COPY git-credential-helper.sh /usr/local/bin/agentbox-git-credential
+COPY scripts/entrypoint.sh /usr/local/bin/agentbox-entrypoint
+COPY scripts/git-credential-helper.sh /usr/local/bin/agentbox-git-credential
 RUN chmod +x /usr/local/bin/agentbox-entrypoint /usr/local/bin/agentbox-git-credential
 
 # CRITICAL: Unbuffered output for streaming

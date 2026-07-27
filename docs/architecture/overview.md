@@ -1,7 +1,7 @@
 # Architecture
 
 How the pieces fit. For *why* the security choices are what they are, see
-`SECURITY.md`; for what is in scope, `SPEC.md`.
+`docs/architecture/security.md`; for what is in scope, `SPEC.md`.
 
 ## One process, three surfaces
 
@@ -129,7 +129,7 @@ Debian slim (`python:3.12-slim-bookworm`, pinned — trixie renames
 option. Also installed: tmux, zsh, git, FiraCode Nerd Font, Powerlevel10k and
 oh-my-zsh, so the terminal looks like the operator's own.
 
-`docker-entrypoint.sh` runs as root only long enough to fix ownership of the
+`scripts/entrypoint.sh` runs as root only long enough to fix ownership of the
 mounted volumes, then drops to the `agentbox` user (uid 1000) with
 `setpriv --inh-caps=-all`. An entrypoint rather than a bare `USER` directive
 because a named volume created by an earlier root-running build stays

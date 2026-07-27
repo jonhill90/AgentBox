@@ -12,24 +12,36 @@ taking over. Local-only, single operator, Phase 1.
 
 | You need | Read |
 |---|---|
-| What is required and why | `docs/PRD.md` (product) then `docs/SPEC.md` (engineering) |
-| How the pieces fit together | `docs/ARCHITECTURE.md` |
-| The threat model and every security decision | `docs/SECURITY.md` |
-| Running, testing, debugging | `docs/DEVELOPMENT.md` |
+| What is required and why | `PRD.md` (product) then `SPEC.md` (engineering) |
+| How the pieces fit together | `docs/architecture/overview.md` |
+| The threat model and every security decision | `docs/architecture/security.md` |
+| Running, testing, debugging | `docs/development/local-setup.md` |
+| Why a design is the way it is | `docs/decisions/` (short ADRs) |
+| How to enable auth / terminal / git push | `docs/runbooks/` |
 | Operator-facing usage | `README.md` |
+| The full documentation map | `docs/README.md` |
 
-`docs/SPEC.md` is the source of truth for scope. Sections map to
+`SPEC.md` is the source of truth for scope. Sections map to
 implementation; §14 is Phase 2 and is **not to be built**.
+
+## Layout
+
+Flat by design — one service, one repo. `PRD.md`/`SPEC.md` at the root,
+`src/` (application), `tests/`, `theme/` (tmux/zsh/p10k), `scripts/`
+(entrypoint and the git credential helper), `secrets/` (gitignored, never
+commit anything under it), `docs/` (see the map above). The reasoning,
+including why this is *not* `services/agentbox/`, is in
+`docs/decisions/0005-flat-repo-layout.md`.
 
 ## Invariants — do not break these without an explicit decision
 
 These are not style preferences. Each was a deliberate call with a reason
-recorded in `docs/SECURITY.md`; several were bought with real bugs.
+recorded in `docs/architecture/security.md`; several were bought with real bugs.
 
 1. **The browser page is never recreated per call.** One Playwright `Page`
    lives on a dedicated asyncio loop in a background thread for the life of
    the process. Everything dispatches into it. This is the whole point of
-   the project — see `docs/ARCHITECTURE.md`.
+   the project — see `docs/architecture/overview.md`.
 2. **Toggled-off means absent, not refusing.** When a feature flag is off,
    its tools/routes are never registered — they do not appear in
    `list_tools()` and the route 404s. A tool that exists and returns
@@ -49,7 +61,7 @@ recorded in `docs/SECURITY.md`; several were bought with real bugs.
 
 ## Ground rules for changing this repo
 
-- **Spec first.** The operator writes `docs/PRD.md` / `docs/SPEC.md`
+- **Spec first.** The operator writes `PRD.md` / `SPEC.md`
   sections, then work is built against them. Do not invent scope. If a spec
   section is marked DRAFT or carries a `DECISION` marker, stop and ask.
 - **Verify, do not assert.** Run the suite from a clean rebuild and paste

@@ -144,7 +144,7 @@ from the blocklist.
 
 ## Privilege
 
-The container runs as `agentbox` (uid 1000). `docker-entrypoint.sh` is root
+The container runs as `agentbox` (uid 1000). `scripts/entrypoint.sh` is root
 only long enough to fix volume ownership, then drops with
 `setpriv --inh-caps=-all` so nothing the shell spawns can regain
 capabilities. Tests assert the server process is not root, the shell is not

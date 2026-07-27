@@ -240,7 +240,7 @@ async def execute_git(action: str, paths: str = ".", message: str = "", count: i
 # resolve DNS independently, so a TTL-0 record answering public once and
 # private the second time still gets through (classic rebinding TOCTOU). The
 # complete fix is to resolve once and pin the connection to the vetted
-# address with the hostname carried in Host/SNI. Tracked in docs/SECURITY.md.
+# address with the hostname carried in Host/SNI. Tracked in docs/architecture/security.md.
 
 # CGNAT is the only range Python's ipaddress does not already classify, and
 # it is the one Tailscale uses. Everything else is covered by the property

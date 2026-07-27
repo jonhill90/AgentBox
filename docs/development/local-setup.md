@@ -9,7 +9,7 @@ curl http://localhost:8054/health
 ```
 
 Published on `127.0.0.1:8054` only. `AGENTBOX_BIND` overrides that, but read
-`SECURITY.md` first — Docker publishes to all interfaces by default and, on
+`docs/architecture/security.md` first — Docker publishes to all interfaces by default and, on
 Linux, bypasses `ufw` entirely.
 
 ## Test it

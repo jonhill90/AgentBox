@@ -15,10 +15,14 @@ deployment, no Tailscale.
 | Read this | For |
 |---|---|
 | **`CLAUDE.md`** | Agent orientation — start here if you are an AI working on this repo |
-| `docs/ARCHITECTURE.md` | How the pieces fit together |
-| `docs/SECURITY.md` | Threat model and every security decision, with citations |
-| `docs/DEVELOPMENT.md` | Running, testing, debugging, and the traps |
-| `docs/PRD.md` / `docs/SPEC.md` | What is required, and the scope boundary |
+| `docs/architecture/overview.md` | How the pieces fit together |
+| `docs/architecture/security.md` | Threat model and every security decision, with citations |
+| `docs/development/local-setup.md` | Running, testing, debugging, and the traps |
+| `docs/decisions/` | Short records of why each load-bearing design call was made |
+| `docs/runbooks/` | Procedures: enable auth, rotate the token, enable the terminal, enable git push |
+| `PRD.md` / `SPEC.md` | What is required, and the scope boundary |
+
+Full map with one-line summaries: **`docs/README.md`**.
 
 The rest of this file is operator-facing usage.
 
@@ -311,7 +315,7 @@ session cannot read `AGENTBOX_AUTH_TOKEN` out of the server process.
 
 **The shell is not root.** The container runs as an unprivileged `agentbox`
 user (uid 1000) which owns `/workspace`, the screenshots volume and the
-Playwright browser cache. `docker-entrypoint.sh` fixes volume ownership as root
+Playwright browser cache. `scripts/entrypoint.sh` fixes volume ownership as root
 and then drops privileges with `setpriv --inh-caps=-all` before the server
 starts, so a volume created by an older root-running build keeps working. This
 matches Hill90's `agentuser`.
@@ -520,18 +524,35 @@ docker compose restart                 # restart — also gives a fresh browser
 ## Files
 
 ```
-agentbox/
+AgentBox/
+├── CLAUDE.md               # agent orientation — invariants and traps
+├── PRD.md  SPEC.md         # what is required; SPEC is the scope boundary
 ├── Dockerfile              # Debian slim + Playwright/Chromium + tmux/zsh
-├── docker-entrypoint.sh    # fixes volume ownership, then drops root
-├── theme/                  # tmux Tokyo Night + zshrc (SPEC §15.6)
 ├── docker-compose.yml      # single service, local only
 ├── pyproject.toml          # Python dependencies + pytest config
-├── .env.example            # AGENTBOX_PORT, LOG_LEVEL
-├── docs/                   # PRD.md, SPEC.md
-├── src/mcp_server.py       # FastMCP server + persistent browser loop
-└── tests/
-    ├── conftest.py            # container fixture + MCP client helpers
-    ├── test_integration.py    # happy path + persistence proof
-    ├── test_error_paths.py    # failure modes
-    └── test_resilience.py     # load, leaks, restart
+├── .env.example            # AGENTBOX_PORT, LOG_LEVEL, feature toggles
+├── scripts/
+│   ├── entrypoint.sh          # fixes volume ownership, then drops root
+│   └── git-credential-helper.sh  # read-only: answers `get`, ignores `store`
+├── theme/                  # tmux Tokyo Night + zshrc + p10k (SPEC §15.6)
+├── secrets/                # gitignored — never commit anything here
+├── docs/
+│   ├── README.md              # the documentation map
+│   ├── architecture/          # overview.md, security.md
+│   ├── decisions/             # numbered ADRs
+│   ├── development/           # local-setup.md
+│   └── runbooks/              # enable-auth, rotate-auth-token, enable-terminal, enable-git-push
+├── src/
+│   ├── mcp_server.py          # FastMCP server + persistent browser loop
+│   ├── auth.py                # bearer token, constant-time, fail-closed
+│   ├── terminal.py            # PTY over WebSocket
+│   ├── jumpbox_tools.py       # filesystem / git / http_request
+│   ├── git_credentials.py     # file-backed push credentials (SPEC §16)
+│   ├── policy.py              # PathPolicy scoping
+│   ├── ui.html                # viewer: browser + terminal tabs
+│   └── vendor/                # xterm.js (vendored; fonts are not)
+└── tests/                  # conftest.py + 13 suites: integration, error paths,
+                            # resilience, auth, hardening, terminal, jumpbox tools,
+                            # SSRF redirects, policy, UI API, feature toggles,
+                            # git credentials, audit gaps
 ```
