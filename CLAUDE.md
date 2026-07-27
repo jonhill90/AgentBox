@@ -1,5 +1,7 @@
 # AgentBox — agent orientation
 
+*(`AGENTS.md` and `CLAUDE.md` are the same file — one is a symlink, so there is no second copy to drift.)*
+
 Read this first. It is deliberately short; follow the links only when you
 need them.
 
@@ -12,7 +14,7 @@ taking over. Local-only, single operator, Phase 1.
 
 | You need | Read |
 |---|---|
-| What is required and why | `PRD.md` (product) then `SPEC.md` (engineering) |
+| What is required and why | `docs/PRD.md` (product) then `docs/SPEC.md` (engineering) |
 | How the pieces fit together | `docs/architecture/overview.md` |
 | The threat model and every security decision | `docs/architecture/security.md` |
 | Running, testing, debugging | `docs/development/local-setup.md` |
@@ -21,16 +23,20 @@ taking over. Local-only, single operator, Phase 1.
 | Operator-facing usage | `README.md` |
 | The full documentation map | `docs/README.md` |
 
-`SPEC.md` is the source of truth for scope. Sections map to
+`docs/SPEC.md` is the source of truth for scope. Sections map to
 implementation; §14 is Phase 2 and is **not to be built**.
 
 ## Layout
 
-Flat by design — one service, one repo. `PRD.md`/`SPEC.md` at the root,
-`src/` (application), `tests/`, `theme/` (tmux/zsh/p10k), `scripts/`
-(entrypoint and the git credential helper), `secrets/` (gitignored, never
-commit anything under it), `docs/` (see the map above). The reasoning,
-including why this is *not* `services/agentbox/`, is in
+Flat by design — one service, one repo.
+
+- `docs/` — the specs (`PRD.md`, `SPEC.md`) and all documentation
+- `src/` — the application, six modules
+- `tests/` — the suite; `theme/` — tmux/zsh/p10k
+- `scripts/` — entrypoint and the git credential helper
+- `secrets/` — gitignored, never commit anything under it
+
+Why this is *not* `services/agentbox/`, and why the specs sit in `docs/`:
 `docs/decisions/0005-flat-repo-layout.md`.
 
 ## Invariants — do not break these without an explicit decision
@@ -61,7 +67,7 @@ recorded in `docs/architecture/security.md`; several were bought with real bugs.
 
 ## Ground rules for changing this repo
 
-- **Spec first.** The operator writes `PRD.md` / `SPEC.md`
+- **Spec first.** The operator writes `docs/PRD.md` / `docs/SPEC.md`
   sections, then work is built against them. Do not invent scope. If a spec
   section is marked DRAFT or carries a `DECISION` marker, stop and ask.
 - **Verify, do not assert.** Run the suite from a clean rebuild and paste
@@ -82,11 +88,12 @@ recorded in `docs/architecture/security.md`; several were bought with real bugs.
 
 ```bash
 docker compose up -d --build          # start (127.0.0.1:8054 only)
-.venv-test/bin/python -m pytest tests/ -q    # 260 tests, ~4 min, needs the container
+.venv-test/bin/python -m pytest tests/ -q    # 257 pass / 3 skip, ~5 min, needs the container
 ```
 
 - MCP endpoint `http://localhost:8054/mcp` (Streamable HTTP) · viewer `/ui`
 - Config lives in `.env`; `.env.example` documents every variable
 - Auth is **off** unless `AGENTBOX_AUTH_TOKEN` is set; the terminal is **off**
   unless `AGENTBOX_ENABLE_TERMINAL=true` *and* a token is set
-- Source is `src/` — five modules, all under 400 lines except `mcp_server.py`
+- Source is `src/` — six modules; `mcp_server.py` (~1066), `jumpbox_tools.py`
+  and `terminal.py` are the large ones

@@ -1,6 +1,6 @@
-# SPEC.md — AgentBox Phase 1 Engineering Spec
+# docs/SPEC.md — AgentBox Phase 1 Engineering Spec
 
-Build from this spec and `PRD.md` — not from conversation history or
+Build from this spec and `docs/PRD.md` — not from conversation history or
 assumptions about what Hill90 does. If the spec is missing something
 you need, stop and flag it rather than guessing.
 

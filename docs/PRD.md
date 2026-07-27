@@ -1,4 +1,4 @@
-# PRD.md — AgentBox
+# docs/PRD.md — AgentBox
 
 > **Status:** Phase 1 — local browser-tool MCP server, Docker-only, dev
 > machine only. Nothing in this phase touches a cloud host, a tailnet,
@@ -44,7 +44,7 @@ tool calls without the page resetting between them.
   life of the process. Tool calls dispatch into that loop; the page
   is never recreated per call.
 - Tool surface is a strict subset of Hill90's browser tool — see
-  `SPEC.md` §5 for the exact list. Nothing beyond it.
+  `docs/SPEC.md` §5 for the exact list. Nothing beyond it.
 - Transport: Streamable HTTP, matching this repo's existing
   `src/mcp_server.py` (FastMCP) pattern.
 - Runs in Docker via `docker-compose`, on the operator's machine only.

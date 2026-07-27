@@ -90,4 +90,4 @@ Also revoke at the forge — a deleted local file is not a revoked
 credential.
 
 **Detail:** [`../architecture/security.md`](../architecture/security.md)
-§ Git push credentials, and `SPEC.md` §16.
+§ Git push credentials, and `docs/SPEC.md` §16.

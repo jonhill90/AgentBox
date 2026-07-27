@@ -15,7 +15,7 @@ What makes this box unusual, and what drives most decisions below:
 - It **runs a browser that reads untrusted web content**.
 - It **grants a real shell** (PTY) when the terminal is enabled.
 
-Those two together are the standard prompt-injection-to-RCE path. `PRD.md`
+Those two together are the standard prompt-injection-to-RCE path. `docs/PRD.md`
 §1.5 states this explicitly and is why a general `execute_command` tool was
 rejected rather than merely postponed: binary allowlisting cannot contain a
 real shell, because allowed binaries can be chained.
@@ -39,7 +39,7 @@ accordingly.
 ## Auth
 
 A shared bearer token, ported from hill90-app's `WORK_TOKEN` pattern.
-Deliberately **not** OAuth — that is Phase 2 (`SPEC.md` §14 item 1). The MCP
+Deliberately **not** OAuth — that is Phase 2 (`docs/SPEC.md` §14 item 1). The MCP
 spec makes authorization OPTIONAL and its Security Best Practices page
 explicitly sanctions *"Require an authorization token"* for locally-run HTTP
 servers, so this is a conforming choice rather than a shortcut.
@@ -189,7 +189,7 @@ The secret is read from a **file** so it stays out of `docker inspect`, the
 credential helper is **read-only** so nothing in the container can rewrite
 it, and SSH keeps `StrictHostKeyChecking` on. Scope the credential itself —
 a fine-grained PAT limited to specific repositories, or a per-repo deploy
-key. See `SPEC.md` §16.
+key. See `docs/SPEC.md` §16.
 
 **Inherent limitation:** with the terminal on, the shell shares the server's
 uid and can read the credential file. Any process that can run `git` can get
@@ -228,7 +228,7 @@ box, and anyone reasoning about egress should know that.
 ## Phase 2 is not built
 
 No OAuth, no cloud deploy, no Tailscale, no DebateWho config, no
-`execute_command`. `SPEC.md` §14 tracks these. Note two findings that will
+`execute_command`. `docs/SPEC.md` §14 tracks these. Note two findings that will
 matter when it starts:
 
 - **claude.ai cannot reach a localhost server at all** — it rejects any

@@ -1,7 +1,7 @@
 # Architecture
 
 How the pieces fit. For *why* the security choices are what they are, see
-`docs/architecture/security.md`; for what is in scope, `SPEC.md`.
+`docs/architecture/security.md`; for what is in scope, `docs/SPEC.md`.
 
 ## One process, three surfaces
 

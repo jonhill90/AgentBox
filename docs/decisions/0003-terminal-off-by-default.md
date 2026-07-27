@@ -16,7 +16,7 @@ The structured tools are bounded — the filesystem tools are path-scoped,
 git takes a fixed set of subcommands, `http_request` resolves and pins its
 destination. A shell is none of those things. Combined with the browser
 reading untrusted web content, it completes a prompt-injection-to-RCE path
-(`PRD.md` §1.5). That is a different category of exposure and gets a
+(`docs/PRD.md` §1.5). That is a different category of exposure and gets a
 different default.
 
 ## Rejected: folding it into the jumpbox toggle

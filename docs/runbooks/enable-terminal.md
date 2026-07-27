@@ -4,7 +4,7 @@
 
 A shell, running as the same uid as the server, in a container whose
 browser reads untrusted web content. That is the
-prompt-injection-to-RCE path named in `PRD.md` §1.5. It is off by default
+prompt-injection-to-RCE path named in `docs/PRD.md` §1.5. It is off by default
 for this reason — see
 [`decisions/0003-terminal-off-by-default.md`](../decisions/0003-terminal-off-by-default.md).
 

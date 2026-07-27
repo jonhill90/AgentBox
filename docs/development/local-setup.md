@@ -120,5 +120,5 @@ ported from and is **read-only**. Useful when porting: its
 `SessionPane.tsx` and `XTerminal.tsx` the viewer models.
 
 Where this repo deliberately differs from it is recorded in the relevant
-`SPEC.md` section — for example the terminal keeps the `vcs` prompt segment
+`docs/SPEC.md` section — for example the terminal keeps the `vcs` prompt segment
 that hill90-app dropped, because gitstatusd is pre-fetched here.

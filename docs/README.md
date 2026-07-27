@@ -4,10 +4,17 @@ Progressive disclosure: start at the top, go deeper only when you need to.
 
 | Start here | |
 |---|---|
-| [`../CLAUDE.md`](../CLAUDE.md) | Agent entry point — invariants, ground rules, traps |
-| [`../README.md`](../README.md) | What AgentBox is, and the full tool reference |
-| [`../PRD.md`](../PRD.md) | What is required, and why (product) |
-| [`../SPEC.md`](../SPEC.md) | The engineering spec — **source of truth for scope** |
+| [`../AGENTS.md`](../AGENTS.md) | Agent entry point — invariants, ground rules, traps (`CLAUDE.md` is the same file) |
+| [`../README.md`](../README.md) | What AgentBox is, and how to start it |
+| [`PRD.md`](PRD.md) | What is required, and why (product) |
+| [`SPEC.md`](SPEC.md) | The engineering spec — **source of truth for scope** |
+
+## reference/ — the surfaces
+
+| | |
+|---|---|
+| [`reference/tools.md`](reference/tools.md) | Every MCP tool, its arguments, and how it is contained |
+| [`reference/http-api.md`](reference/http-api.md) | HTTP routes, auth behaviour, error shape |
 
 ## architecture/ — how it fits together
 

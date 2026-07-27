@@ -10,7 +10,7 @@ configured the guard is not wired in at all.
 
 ## Rejected: OAuth 2.1
 
-OAuth is `SPEC.md` §14 item 1 — explicitly Phase 2, explicitly not built.
+OAuth is `docs/SPEC.md` §14 item 1 — explicitly Phase 2, explicitly not built.
 For a loopback-bound single-operator server it would add an authorization
 server, redirect handling, and token lifecycle for no gain in this threat
 model.
