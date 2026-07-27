@@ -34,7 +34,7 @@ Both tokens now work. Verify the old one still does before you rely on it:
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' \
   -H "Authorization: Bearer $(cat secrets/auth_token_previous)" \
-  http://127.0.0.1:8054/api/state    # 200
+  http://127.0.0.1:8054/api/screenshot    # 200
 ```
 
 ## 4. Move every client to the new token
@@ -49,7 +49,7 @@ Clear `AGENTBOX_AUTH_TOKEN_PREVIOUS`, remove
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' \
   -H "Authorization: Bearer <old token>" \
-  http://127.0.0.1:8054/api/state    # 401
+  http://127.0.0.1:8054/api/screenshot    # 401
 ```
 
 **Do not skip step 5.** An overlap left open forever is two live

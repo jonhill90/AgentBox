@@ -39,12 +39,16 @@ docker compose logs agentbox | grep -i fingerprint
 Unauthenticated calls must now fail, and `/health` must still pass:
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8054/api/state   # 401
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8054/health      # 200
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8054/api/screenshot   # 401
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $(cat secrets/auth_token)" \
+     http://127.0.0.1:8054/api/screenshot                                       # 200
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8054/health          # 200
 ```
 
-401 on the first and 200 on the second is the check. If `/api/state`
-returns 200, the token did not load — look for the fingerprint line.
+401 unauthenticated, 200 with the token, and `/health` open is the check.
+If the first returns 200 the token did not load — look for the fingerprint
+line. If it returns **404** you have the wrong path: a 404 means the route
+does not exist, which is not evidence of anything about auth.
 
 ## 4. Point clients at it
 
