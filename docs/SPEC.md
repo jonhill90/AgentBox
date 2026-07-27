@@ -319,33 +319,53 @@ and `ws_terminal_handler`).
 
 1. OAuth wrapper approach (Cloudflare Worker `workers-oauth-provider`
    template vs. hand-rolled DCR/CIMD) — §12's bearer token becomes the
-   credential this fronts, per the connector-auth research: it's
-   already the shape Anthropic's `static_headers` beta expects.
+   credential this fronts, per the connector-auth research: it's already
+   the shape Anthropic's `static_headers` beta expects, so this may be
+   smaller than it looks.
 2. Deployment target: DebateWho's VPS/Traefik, new subdomain,
    `policy.hujson`/DNS entries — none of this exists yet and shouldn't
    be scaffolded speculatively in Phase 1.
 3. Security scoping once tailnet-reachable: the real, enforced version
-   of §7's `NETWORK_ALLOWLIST` — should this box reach anything besides
-   `dev.debatewho.com`? Default assumption is no. This is where the
-   Docker-level firewall/iptables enforcement deferred in §7 actually
-   gets built, once there's a real deployment target to enforce it on.
-4. The terminal (Hill90's `ws_terminal.py`/`pty_shell.py`/
-   `XTerminal.tsx` — a real interactive PTY, not a policy-checked
-   command tool). Its own dedicated build, its own PRD/SPEC entry when
-   that starts. Decision made: its own separate toggle
-   (`AGENTBOX_ENABLE_TERMINAL`), not shared with §10's
-   `AGENTBOX_ENABLE_JUMPBOX_TOOLS` — a PTY is a categorically different
-   risk than a path-scoped file read, and a shared flag would make
-   "filesystem on, PTY off" inexpressible, which is likely the exact
-   posture wanted for a non-local profile. Genuinely absent from the
-   MCP/route surface when its toggle is off, same discipline as §8/§9.
-5. Whether §8/§9's tools, and the eventual terminal, actually get
-   flipped off and verified off (PRD 1.9's last requirement) before
-   Phase 2 planning starts — this needs to actually happen once, not
-   just be assumed because a toggle exists.
-6. The terminal's WebSocket reuses §12's `AGENTBOX_AUTH_TOKEN` as its
-   `?token=` query param, exactly like Hill90's `ws_terminal_handler`
-   reuses `WORK_TOKEN` — one secret, not a second bespoke one.
+   of §7's `NETWORK_ALLOWLIST`. Default assumption is that this box
+   reaches nothing besides `dev.debatewho.com`. Note this MUST be
+   enforced at the network layer: `navigate`/`evaluate` give Chromium
+   unfiltered egress that no tool-layer check can constrain (recorded
+   in `docs/architecture/security.md`).
+4. ~~The terminal~~ — **BUILT, see §15.** Struck 2026-07-27. Its own
+   toggle `AGENTBOX_ENABLE_TERMINAL`, defaulting false, as decided here.
+5. ~~Whether §8/§9's tools and the terminal actually get flipped off and
+   verified off~~ — **DONE, PRD 1.9 satisfied.** Struck 2026-07-27.
+   `tests/test_feature_toggle.py` starts a real container with
+   `AGENTBOX_ENABLE_JUMPBOX_TOOLS=false` and asserts absence from
+   `list_tools()`; `tests/test_terminal.py:166` asserts the route is
+   absent, failing at the transport rather than returning a 403.
+6. ~~The terminal's WebSocket reuses `AGENTBOX_AUTH_TOKEN` as `?token=`~~
+   — **REVERSED, do not build this.** Struck 2026-07-27. RFC 9700
+   §4.3.2 makes credentials in query strings a MUST NOT; they land in
+   logs, proxies and `Referer`. The built terminal authenticates by
+   `Authorization` header before `accept()`, or by a first text frame
+   for browsers that cannot set headers, and a `?token=` parameter is
+   *refused* rather than honoured. One secret is still reused — only
+   the transport differs from Hill90.
+7. **Bring `AGENTBOX_AUTH_TOKEN_FILE` into §12, then wire and test it.**
+   `src/auth.py` implements this variable and the runbooks tell the
+   operator to prefer it, but §12 never specified it — outside this item
+   it appears nowhere in this document. `docker-compose.yml` also
+   defines no `secrets:` block, so the preferred path is not usable as
+   shipped, and no test covers it; the only `*_FILE` coverage is
+   `tests/test_git_credentials.py`, for §16, which *does* pair with
+   Compose `secrets:` and is the model to copy. Until this lands, the
+   working configuration is the env-value form, which `docker inspect`
+   returns verbatim. Phase 1 work, in that order — spec §12 first, then
+   compose, then a test — and a prerequisite for every option in item 2.
+8. **TLS termination before anything non-loopback.** Every surface is
+   plain HTTP today. Correct while bound to `127.0.0.1`; a bearer token
+   over cleartext is not, the moment item 2 makes this reachable.
+9. **Exercise the rotation procedure once.** `AGENTBOX_AUTH_TOKEN_PREVIOUS`
+   is covered at `tests/test_hardening.py:120`, but the five-step
+   runbook in `docs/runbooks/rotate-auth-token.md` has never been run
+   end to end. An untested rotation procedure is one that will not be
+   used under pressure.
 
 ## 15. Interactive terminal (PRD 1.11) — BUILT
 
@@ -370,10 +390,12 @@ now dangling and want a sweep.
 
 `ws_terminal_handler` as it stands. Concretely:
 
-- **Auth first, before `websocket.accept()`.** The token comes from
-  `?token=`; a mismatch closes with code `4001`, reason `unauthorized`.
-  Rejecting before accepting means an unauthorised client never gets a
-  live socket.
+- **Auth first, before `websocket.accept()`.** The token comes from the
+  `Authorization` header, or from a first text frame for browser clients
+  that cannot set headers. A `?token=` query parameter is refused, not
+  honoured (RFC 9700 §4.3.2). A mismatch closes with code `4001`, reason
+  `unauthorized`. Rejecting before accepting means an unauthorised client
+  never gets a live socket.
 - **PTY setup:** `pty.openpty()`, `TIOCSWINSZ` to 120x40, `os.fork()`.
   The child calls `setsid()`, dups the slave onto fds 0/1/2, `chdir`s to
   `$HOME`, and `execvpe`s with an explicitly constructed environment —
@@ -419,10 +441,10 @@ it. Do not port it as a bonus.
 - When off, the `WebSocketRoute` is not registered. The trip-wire test
   is a connection attempt that fails at the transport, not a 403 from a
   live endpoint.
-- Auth reuses `AGENTBOX_AUTH_TOKEN` via `?token=`. `src/auth.py` needs a
-  small addition: `check_bearer()` takes a full `Authorization` header,
-  so factor out a `check_token(raw: str) -> bool` that both it and the
-  WebSocket path call. Keep `secrets.compare_digest`.
+- Auth reuses `AGENTBOX_AUTH_TOKEN` via the `Authorization` header.
+  `check_bearer()` takes a full header and delegates to
+  `check_token(raw: str) -> bool`, which the WebSocket path also calls.
+  Keep `secrets.compare_digest`.
 - **CHOSEN: fail closed** when `AGENTBOX_AUTH_TOKEN` is unset, as Hill90
   does (`if not work_token or token != work_token`). This is the one
   place where "auth off means open" does not apply. The server logs a
